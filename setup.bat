@@ -3,12 +3,17 @@ echo ========================================
 echo  Hong Kong Stock Prediction - Setup
 echo ========================================
 echo.
-echo Creating virtual environment...
-python -m venv venv
-if errorlevel 1 (
-    echo ERROR: Failed to create virtual environment.
-    pause
-    exit /b 1
+if exist venv\Scripts\activate (
+    echo Virtual environment already exists. Activating...
+) else (
+    echo Creating virtual environment...
+    python -m venv venv
+    if errorlevel 1 (
+        echo ERROR: Failed to create virtual environment.
+        echo Try running this script as Administrator.
+        pause
+        exit /b 1
+    )
 )
 echo Activating virtual environment...
 call venv\Scripts\activate

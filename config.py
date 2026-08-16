@@ -16,7 +16,6 @@ HK_TZ = pytz.timezone('Asia/Hong_Kong')
 # Required environment variables
 SUPABASE_URL = os.getenv('SUPABASE_URL')
 SUPABASE_KEY = os.getenv('SUPABASE_KEY')
-SUPABASE_DB_PASSWORD = os.getenv('SUPABASE_DB_PASSWORD')
 STOCK_LIST_RAW = os.getenv('STOCK_LIST', '')
 
 # Parse stock list
@@ -28,8 +27,6 @@ if not SUPABASE_URL:
     _missing.append('SUPABASE_URL')
 if not SUPABASE_KEY:
     _missing.append('SUPABASE_KEY')
-if not SUPABASE_DB_PASSWORD:
-    _missing.append('SUPABASE_DB_PASSWORD')
 if not STOCK_LIST:
     _missing.append('STOCK_LIST')
 

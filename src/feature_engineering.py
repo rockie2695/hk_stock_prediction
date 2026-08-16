@@ -8,13 +8,34 @@ from src.logger import setup_logger
 
 logger = setup_logger('feature_engineering')
 
+# All feature columns
 FEATURE_COLUMNS = [
+    # Price features
     'ret_5d', 'ret_10d', 'ret_20d',
-    'vol_ratio_5d',
+    'ret_1d',
+    'high_low_range', 'close_to_high', 'close_to_low',
+    # Volume features
+    'vol_ratio_5d', 'vol_ratio_10d',
+    'obv_change',
+    # RSI
     'rsi_14',
+    # MACD
     'macd_diff', 'macd_dea', 'macd_hist',
+    # Bollinger
     'bb_width',
-    'atr_14'
+    # ATR
+    'atr_14',
+    # Stochastic
+    'stoch_k', 'stoch_d',
+    # ADX
+    'adx',
+    # MFI
+    'mfi',
+    # Rolling statistics
+    'ret_5d_skew', 'ret_5d_kurt',
+    'volatility_10d',
+    # Market context (added dynamically if available)
+    # 'hsi_ret_5d', 'usdhkd_change',
 ]
 
 
@@ -31,15 +52,26 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    # --- Return features ---
+    # --- Price features ---
+    df['ret_1d'] = df['Close'].pct_change(1)
     df['ret_5d'] = df['Close'].pct_change(5)
     df['ret_10d'] = df['Close'].pct_change(10)
     df['ret_20d'] = df['Close'].pct_change(20)
 
-    # --- Volume ratio (current / 5-day average) ---
-    df['vol_ratio_5d'] = df['Volume'] / df['Volume'].rolling(5).mean()
+    # Intraday range
+    df['high_low_range'] = (df['High'] - df['Low']) / df['Close']
+    df['close_to_high'] = (df['High'] - df['Close']) / df['Close']
+    df['close_to_low'] = (df['Close'] - df['Low']) / df['Close']
 
-    # --- RSI (14-day) using Wilder's smoothing ---
+    # --- Volume features ---
+    df['vol_ratio_5d'] = df['Volume'] / df['Volume'].rolling(5).mean()
+    df['vol_ratio_10d'] = df['Volume'] / df['Volume'].rolling(10).mean()
+
+    # OBV change
+    obv = _compute_obv(df)
+    df['obv_change'] = obv.pct_change(5)
+
+    # --- RSI (14-day) ---
     df['rsi_14'] = _compute_rsi(df['Close'], period=14)
 
     # --- MACD (12, 26, 9) ---
@@ -58,6 +90,22 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- ATR (14-day) ---
     df['atr_14'] = _compute_atr(df, period=14)
 
+    # --- Stochastic (14, 3, 3) ---
+    stoch_k, stoch_d = _compute_stochastic(df, k_period=14, d_period=3)
+    df['stoch_k'] = stoch_k
+    df['stoch_d'] = stoch_d
+
+    # --- ADX (14) ---
+    df['adx'] = _compute_adx(df, period=14)
+
+    # --- MFI (14) ---
+    df['mfi'] = _compute_mfi(df, period=14)
+
+    # --- Rolling statistics ---
+    df['ret_5d_skew'] = df['ret_1d'].rolling(5).skew()
+    df['ret_5d_kurt'] = df['ret_1d'].rolling(5).kurt()
+    df['volatility_10d'] = df['ret_1d'].rolling(10).std()
+
     logger.info(f"Computed {len(FEATURE_COLUMNS)} features, shape: {df.shape}")
     return df
 
@@ -70,6 +118,44 @@ def compute_target(df: pd.DataFrame) -> pd.DataFrame:
     df['target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
     return df
 
+
+def compute_target_days(df: pd.DataFrame, days: int) -> pd.DataFrame:
+    """
+    Compute binary target for N days ahead.
+    1 if price N days later > today's close, else 0.
+
+    Args:
+        df: DataFrame with Close column
+        days: Number of days ahead to predict (1, 5, or 20)
+
+    Returns:
+        DataFrame with 'target' column
+    """
+    df = df.copy()
+    df['target'] = (df['Close'].shift(-days) > df['Close']).astype(int)
+    return df
+
+
+def compute_target_threshold(df: pd.DataFrame, days: int, threshold: float = 0.02) -> pd.DataFrame:
+    """
+    Compute target with threshold: 1 if price increases > threshold, 0 if decreases > threshold, else 0.5.
+    This makes the target less noisy by filtering out small movements.
+
+    Args:
+        df: DataFrame with Close column
+        days: Number of days ahead
+        threshold: Minimum change to count as positive (default 2%)
+
+    Returns:
+        DataFrame with 'target' column (0 or 1, filtered by threshold)
+    """
+    df = df.copy()
+    future_return = (df['Close'].shift(-days) - df['Close']) / df['Close']
+    df['target'] = (future_return > threshold).astype(int)
+    return df
+
+
+# --- Helper functions ---
 
 def _compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     """Compute RSI using Wilder's smoothing method."""
@@ -108,3 +194,75 @@ def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
     atr = tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
     return atr
+
+
+def _compute_obv(df: pd.DataFrame) -> pd.Series:
+    """Compute On Balance Volume."""
+    obv = pd.Series(0, index=df.index, dtype=float)
+    for i in range(1, len(df)):
+        if df['Close'].iloc[i] > df['Close'].iloc[i - 1]:
+            obv.iloc[i] = obv.iloc[i - 1] + df['Volume'].iloc[i]
+        elif df['Close'].iloc[i] < df['Close'].iloc[i - 1]:
+            obv.iloc[i] = obv.iloc[i - 1] - df['Volume'].iloc[i]
+        else:
+            obv.iloc[i] = obv.iloc[i - 1]
+    return obv
+
+
+def _compute_stochastic(df: pd.DataFrame, k_period: int = 14, d_period: int = 3):
+    """Compute Stochastic Oscillator (%K, %D)."""
+    low_min = df['Low'].rolling(k_period).min()
+    high_max = df['High'].rolling(k_period).max()
+
+    stoch_k = 100 * (df['Close'] - low_min) / (high_max - low_min).replace(0, np.nan)
+    stoch_d = stoch_k.rolling(d_period).mean()
+
+    return stoch_k, stoch_d
+
+
+def _compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute Average Directional Index (ADX)."""
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+
+    # +DM and -DM
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    # True Range
+    tr = _compute_atr(df, period=1)  # TR without smoothing
+
+    # Smoothed
+    atr = tr.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean() / atr.replace(0, np.nan))
+    minus_di = 100 * (minus_dm.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean() / atr.replace(0, np.nan))
+
+    # ADX
+    dx = (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan) * 100
+    adx = dx.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
+
+    return adx
+
+
+def _compute_mfi(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute Money Flow Index (MFI)."""
+    typical_price = (df['High'] + df['Low'] + df['Close']) / 3
+    money_flow = typical_price * df['Volume']
+
+    positive_flow = pd.Series(0.0, index=df.index)
+    negative_flow = pd.Series(0.0, index=df.index)
+
+    for i in range(1, len(df)):
+        if typical_price.iloc[i] > typical_price.iloc[i - 1]:
+            positive_flow.iloc[i] = money_flow.iloc[i]
+        elif typical_price.iloc[i] < typical_price.iloc[i - 1]:
+            negative_flow.iloc[i] = money_flow.iloc[i]
+
+    pos_sum = positive_flow.rolling(period).sum()
+    neg_sum = negative_flow.rolling(period).sum()
+
+    mfi = 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
+    return mfi

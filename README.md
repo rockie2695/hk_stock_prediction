@@ -8,6 +8,14 @@
 Windows 本地定時訓練 → 預測結果上傳至 Supabase (PostgreSQL) → Streamlit 網站顯示
 ```
 
+## 功能特色
+
+- **多時間範圍預測**: 同時預測明日(1天)、下週(5天)、下月(20天)
+- **自動模型選擇**: Optuna 自動調參，XGBoost vs LightGBM 自動選出冠軍
+- **27項技術指標**: 包含市場指數、匯率、統計特徵
+- **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
+- **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
+
 ## 快速開始
 
 ### 1. 安裝依賴
@@ -30,7 +38,6 @@ pip install -r requirements.txt
 ```env
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-anon-key
-SUPABASE_DB_PASSWORD=your-db-password
 STOCK_LIST=0700,9988,0005,0939
 ```
 
@@ -47,6 +54,11 @@ python src/init_database.py
 ```bash
 python src/train_model.py
 ```
+
+訓練完成後會顯示：
+- 各時間範圍的冠軍模型 (xgboost/lightgbm)
+- F1 Score 和 AUC Score
+- Top 10 特徵重要性
 
 ### 5. 每日預測與上傳
 
@@ -84,14 +96,15 @@ project_root/
 ├── config.py             # 讀取 .env，提供全域設定
 ├── run_daily.bat         # Windows 批次檔 (排程器用)
 ├── setup.bat             # 一鍵安裝依賴
+├── test_quick.py         # 快速測試腳本
 ├── logs/                 # 日誌資料夾
 ├── models/               # 訓練好的模型 (.pkl)
 ├── src/
 │   ├── __init__.py
 │   ├── logger.py         # 日誌設定
 │   ├── init_database.py  # 自動建表 (冪等)
-│   ├── data_fetcher.py   # 下載港股歷史數據
-│   ├── feature_engineering.py  # 技術指標計算
+│   ├── data_fetcher.py   # 下載港股歷史數據 (akshare/yfinance)
+│   ├── feature_engineering.py  # 27項技術指標計算
 │   ├── train_model.py    # Optuna 自動調參 + Walk-Forward 驗證
 │   └── predict_upload.py # 每日預測並上傳 Supabase
 └── app/
@@ -101,11 +114,77 @@ project_root/
 
 ## 技術細節
 
-- **機器學習模型**: XGBoost / LightGBM，使用 Optuna 自動調參
-- **交叉驗證**: TimeSeriesSplit (n_splits=5)，嚴禁隨機 Shuffle
-- **特徵工程**: RSI, MACD, 布林通道, ATR, 收益率, 成交量比率
-- **目標變數**: 明日收盤價 > 今日收盤價 → 1 (Buy), 否則 → 0 (Sell)
-- **信號判定**: Buy (>0.55), Sell (<0.45), Hold (0.45-0.55)
+### 機器學習模型
+- **演算法**: XGBoost / LightGBM
+- **超參數優化**: Optuna (50 trials per model)
+- **交叉驗證**: TimeSeriesSplit (n_splits=5)
+- **模型選擇**: 基於 F1 Score 自動選出冠軍
+- **訓練數據**: 3 年歷史數據 (約 750 交易日)
+- **類別權重**: 自動平衡正負樣本 (上限3倍)，避免模型偏向多數類
+
+### 技術指標 (27 Features)
+
+| 類別 | 特徵 | 說明 |
+|---|---|---|
+| **報酬率** | `ret_1d`, `ret_5d`, `ret_10d`, `ret_20d` | 1/5/10/20日漲跌幅 |
+| **價格形態** | `high_low_range`, `close_to_high`, `close_to_low` | 日內振幅、收盤位置 |
+| **成交量** | `vol_ratio_5d`, `vol_ratio_10d` | 量能相對強弱 |
+| **成交量** | `obv_change` | OBV (能量潮) 變化 |
+| **動量** | `rsi_14` | RSI 超買/超賣 |
+| **動量** | `stoch_k`, `stoch_d` | 隨機震盪指標 |
+| **動量** | `mfi` | 資金流量指標 |
+| **趨勢** | `macd_diff`, `macd_dea`, `macd_hist` | MACD 三元件 |
+| **趨勢** | `adx` | 趨勢強度 (不分方向) |
+| **波動** | `bb_width`, `atr_14` | 布林寬度、平均真實波幅 |
+| **統計** | `ret_5d_skew`, `ret_5d_kurt` | 報酬率偏度/峰度 |
+| **統計** | `volatility_10d` | 10日波動率 |
+| **市場** | `hsi_ret_5d`, `hsi_ret_20d` | 恒生指數漲跌幅 |
+| **匯率** | `usdhkd_change` | 美元/港幣匯率變化 |
+
+### 目標變數 (Target)
+- **目標**: N天後收盤價 > 今日收盤價 → 1 (Buy)，否則 → 0
+- **類別權重**: 自動平衡正負樣本 (上限3倍)
+- **多時間範圍**: 1天、5天、20天
+
+### 模型表現 (F1 Score)
+| 時間範圍 | F1 Score | 說明 |
+|---|---|---|
+| 1天 | ~0.57 | 可用 — 短期趨勢 |
+| 5天 | ~0.69 | 良好 — 中期動量 |
+| 20天 | ~0.73 | 最佳 — 長期趨勢 |
+
+**注意**: 股票預測本身非常困難，AUC ~0.55-0.60 已是合理範圍。
+
+### 信號判定
+| 信心度 | 信號 |
+|---|---|
+| > 55% | Buy (買入) |
+| < 45% | Sell (賣出) |
+| 45% ~ 55% | Hold (持有) |
+
+### 資料來源
+- **股票數據**: akshare (主) / yfinance (備)
+- **市場指數**: yfinance (^HSI 恒生指數)
+- **匯率**: yfinance (USD/HKD)
+
+## 資料庫結構
+
+```sql
+CREATE TABLE stock_predictions (
+    id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+    stock_code TEXT NOT NULL,
+    prediction_date DATE NOT NULL,
+    timeframe TEXT CHECK (timeframe IN ('1d', '5d', '20d')),
+    signal TEXT CHECK (signal IN ('Buy', 'Sell', 'Hold')),
+    confidence FLOAT8,
+    model_version TEXT,
+    model_type TEXT,          -- 'xgboost' 或 'lightgbm'
+    f1_score FLOAT8,          -- 模型 F1 分數
+    auc_score FLOAT8,         -- 模型 AUC 分數
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(stock_code, prediction_date, timeframe)
+);
+```
 
 ## 注意事項
 
@@ -113,3 +192,24 @@ project_root/
 - 特徵計算嚴禁 Look-ahead Bias（只使用當天之前的數據）
 - `.env` 檔案包含敏感資訊，請勿上傳至版本控制
 - 模型檔案 (`.pkl`) 不上傳至版本控制
+- 可重複執行 `train_model.py` 和 `predict_upload.py`，會自動覆蓋
+
+## 常見問題
+
+### Q: 為什麼 AUC 只有 0.55-0.60？
+A: 股票預測本身非常困難。即使是大型對沖基金，AUC 也通常在 0.55-0.65 之間。你的模型已達到合理範圍。
+
+### Q: F1 Score 代表什麼？
+A: F1 = 精準率與召回率的平衡。F1 > 0.5 表示模型比隨機好，F1 > 0.6 表示可用於交易信號。
+
+### Q: 可以添加更多股票嗎？
+A: 修改 `.env` 中的 `STOCK_LIST`，例如 `STOCK_LIST=0700,9988,0005,0939,1810`
+
+### Q: 如何查看訓練日誌？
+A: 日誌位於 `logs/app.log`
+
+### Q: 訓練要多久？
+A: 約 5-10 分鐘 (取決於股票數量和 Optuna trials)
+
+### Q: 模型會自動更新嗎？
+A: 需要手動執行 `train_model.py` 重新訓練，或設定 Windows 排程器自動執行

@@ -106,7 +106,8 @@ def _fetch_yfinance(stock_code: str, start_date: datetime, end_date: datetime) -
     """Fetch using yfinance as fallback."""
     import yfinance as yf
 
-    ticker = f"{int(stock_code)}.HK"
+    # HK stocks on Yahoo Finance use 4-digit codes: 0700.HK, 9988.HK, etc.
+    ticker = f"{stock_code}.HK"
     data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'),
                        end=end_date.strftime('%Y-%m-%d'), progress=False)
 
