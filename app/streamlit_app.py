@@ -172,7 +172,7 @@ st.subheader("📝 近期預測記錄")
 
 # Only select known columns, ignore extras (id, created_at, etc.)
 base_cols = ['stock_code', 'prediction_date', 'timeframe', 'signal', 'confidence', 'model_version']
-extra_cols = ['model_type', 'f1_score', 'auc_score']
+extra_cols = ['model_type', 'f1_score', 'auc_score', 'expected_return', 'risk_reward']
 available = [c for c in base_cols + extra_cols if c in df.columns]
 
 display_df = df[available].copy()
@@ -184,6 +184,10 @@ if 'f1_score' in display_df.columns:
     display_df['F1 分數'] = display_df['f1_score'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
 if 'auc_score' in display_df.columns:
     display_df['AUC 分數'] = display_df['auc_score'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
+if 'expected_return' in display_df.columns:
+    display_df['預期報酬'] = display_df['expected_return'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
+if 'risk_reward' in display_df.columns:
+    display_df['風險報酬比'] = display_df['risk_reward'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
 
 # Rename
 rename_map = {
@@ -197,7 +201,7 @@ rename_map = {
 display_df = display_df.rename(columns=rename_map)
 
 # Final column order
-final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數']
+final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '預期報酬', '風險報酬比', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數']
 final_cols = [c for c in final_cols if c in display_df.columns]
 display_df = display_df[final_cols]
 display_df = display_df.sort_values('預測日期', ascending=False)
@@ -213,6 +217,8 @@ if 'model_type' in df.columns:
         | **F1 分數** | 精準率與召回率的調和平均數。越高表示模型預測越準確（兼顧「預測對的」和「不漏掉」）。0.5 為隨機水平，>0.6 為可用。 | 0 ~ 1 |
         | **AUC 分數** | 模型區分漲跌的能力。0.5 = 隨機猜測，1.0 = 完美區分。衡量模型對信心度排序的品質。 | 0.5 ~ 1.0 |
         | **冠軍模型** | Optuna 自動調參後，XGBoost 與 LightGBM 在驗證折上比較，選出 F1 較高者。 | xgboost / lightgbm |
+        | **預期報酬** | 基於模型信心度和歷史波動率估算的預期報酬率。正數=預期上漲，負數=預期下跌。 | ±XX% |
+        | **風險報酬比** | 預期收益與潛在風險的比率。>1 表示收益大於風險，<1 表示風險大於收益。 | 0 ~ X |
         """)
 
 # Features explanation

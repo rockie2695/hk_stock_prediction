@@ -144,6 +144,10 @@ def predict_stock(stock_code: str, models: dict) -> list:
     X = valid.iloc[-1:][available_features]
     logger.info(f"  Using {len(available_features)} features for prediction")
 
+    # Calculate historical volatility for expected return estimation
+    hist_vol = valid['ret_1d'].rolling(20).std().iloc[-1] if 'ret_1d' in valid.columns else 0.02
+    avg_daily_return = valid['ret_1d'].rolling(20).mean().iloc[-1] if 'ret_1d' in valid.columns else 0.0
+
     results = []
 
     for label, model_data in models.items():
@@ -167,8 +171,18 @@ def predict_stock(stock_code: str, models: dict) -> list:
 
         prediction_date = get_prediction_date(days)
 
+        # Calculate expected return
+        # Expected return = (confidence - 0.5) * 2 * volatility * sqrt(days)
+        confidence_score = buy_prob - 0.5  # -0.5 to +0.5
+        expected_return = confidence_score * 2 * hist_vol * (days ** 0.5) * 100  # as percentage
+
+        # Risk/reward ratio (simplified)
+        potential_gain = abs(expected_return) if expected_return > 0 else hist_vol * (days ** 0.5) * 100
+        potential_loss = hist_vol * (days ** 0.5) * 100
+        risk_reward = potential_gain / potential_loss if potential_loss > 0 else 0
+
         emoji = {'Buy': '📈', 'Sell': '📉', 'Hold': '➡️'}
-        logger.info(f"  {emoji[signal]} {stock_code} {label}: {signal} ({buy_prob:.2%})")
+        logger.info(f"  {emoji[signal]} {stock_code} {label}: {signal} ({buy_prob:.2%}) | Expected: {expected_return:+.2f}%")
 
         results.append({
             'stock_code': stock_code,
@@ -180,6 +194,8 @@ def predict_stock(stock_code: str, models: dict) -> list:
             'model_type': model_data.get('model_type', ''),
             'f1_score': model_data.get('f1_score', 0.0),
             'auc_score': model_data.get('auc_score', 0.0),
+            'expected_return': round(expected_return, 2),
+            'risk_reward': round(risk_reward, 2),
         })
 
     return results
@@ -212,11 +228,28 @@ def upload_to_supabase(records: list):
                 'model_type': record['model_type'],
                 'f1_score': record['f1_score'],
                 'auc_score': record['auc_score'],
+                'expected_return': record.get('expected_return', None),
+                'risk_reward': record.get('risk_reward', None),
             }
-            client.table('stock_predictions').upsert(
-                upload_data,
-                on_conflict='stock_code,prediction_date,timeframe'
-            ).execute()
+
+            # Try upsert, if conflict then update
+            try:
+                client.table('stock_predictions').upsert(
+                    upload_data,
+                    on_conflict='stock_code,prediction_date,timeframe'
+                ).execute()
+            except Exception as upsert_err:
+                if 'duplicate key' in str(upsert_err):
+                    # Delete and re-insert
+                    client.table('stock_predictions').delete().match({
+                        'stock_code': record['stock_code'],
+                        'prediction_date': record['prediction_date'],
+                        'timeframe': record['timeframe']
+                    }).execute()
+                    client.table('stock_predictions').insert(upload_data).execute()
+                else:
+                    raise upsert_err
+
             success_count += 1
             logger.info(f"  Uploaded: {record['stock_code']} {record['timeframe']}")
         except Exception as e:
