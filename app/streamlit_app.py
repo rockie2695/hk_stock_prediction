@@ -171,7 +171,7 @@ st.markdown("---")
 st.subheader("📝 近期預測記錄")
 
 # Only select known columns, ignore extras (id, created_at, etc.)
-base_cols = ['stock_code', 'prediction_date', 'timeframe', 'signal', 'confidence', 'model_version']
+base_cols = ['stock_code', 'prediction_date', 'timeframe', 'signal', 'confidence', 'model_version', 'created_at']
 extra_cols = ['model_type', 'f1_score', 'auc_score', 'expected_return', 'risk_reward']
 available = [c for c in base_cols + extra_cols if c in df.columns]
 
@@ -187,7 +187,9 @@ if 'auc_score' in display_df.columns:
 if 'expected_return' in display_df.columns:
     display_df['預期報酬'] = display_df['expected_return'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
 if 'risk_reward' in display_df.columns:
-    display_df['風險報酬比'] = display_df['risk_reward'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "-")
+    display_df['風險報酬比'] = display_df['risk_reward'].apply(lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "-")
+if 'created_at' in display_df.columns:
+    display_df['預測時間'] = pd.to_datetime(display_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
 
 # Rename
 rename_map = {
@@ -201,10 +203,10 @@ rename_map = {
 display_df = display_df.rename(columns=rename_map)
 
 # Final column order
-final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '預期報酬', '風險報酬比', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數']
+final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '預期報酬', '風險報酬比', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數', '預測時間']
 final_cols = [c for c in final_cols if c in display_df.columns]
 display_df = display_df[final_cols]
-display_df = display_df.sort_values('預測日期', ascending=False)
+display_df = display_df.sort_values('預測時間', ascending=False)
 
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -219,6 +221,28 @@ if 'model_type' in df.columns:
         | **冠軍模型** | Optuna 自動調參後，XGBoost 與 LightGBM 在驗證折上比較，選出 F1 較高者。 | xgboost / lightgbm |
         | **預期報酬** | 基於模型信心度和歷史波動率估算的預期報酬率。正數=預期上漲，負數=預期下跌。 | ±XX% |
         | **風險報酬比** | 預期收益與潛在風險的比率。>1 表示收益大於風險，<1 表示風險大於收益。 | 0 ~ X |
+        """)
+
+        st.markdown("""
+        **預期報酬計算公式：**
+        ```
+        預期報酬 = (信心度 - 0.5) × 2 × 歷史波動率 × √天數 × 100%
+        ```
+
+        **風險報酬比計算：**
+        - 風險 = 1個標準差的波動（歷史波動率 × √天數）
+        - 報酬 = |預期報酬|
+        - 風險報酬比 = 報酬 / 風險
+
+        **解讀：**
+        - 風險報酬比 > 1：潛在收益大於風險（有利）
+        - 風險報酬比 < 1：潛在收益小於風險（不利）
+        - 風險報酬比 = 1：收益與風險平衡
+
+        **信號與預期報酬：**
+        - **Buy 信號**：預期報酬為正 → 預期上漲，買入獲利
+        - **Sell 信號**：預期報酬為負 → 預期下跌，放空獲利（做空）
+        - **Hold 信號**：預期報酬接近0 → 無明確方向，觀望
         """)
 
 # Features explanation

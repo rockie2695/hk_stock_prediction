@@ -24,6 +24,10 @@ echo Started at %date% %time% >> logs\run_log.txt
 echo Training model... >> logs\run_log.txt
 python src\train_model.py >> logs\run_log.txt 2>&1
 
+:: Cleanup old records (keep 60 days)
+echo Cleaning up old records... >> logs\run_log.txt
+python src\cleanup_old.py >> logs\run_log.txt 2>&1
+
 :: Predict and upload
 echo Predicting... >> logs\run_log.txt
 python src\predict_upload.py >> logs\run_log.txt 2>&1

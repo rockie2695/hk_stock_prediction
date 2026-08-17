@@ -176,13 +176,38 @@ def predict_stock(stock_code: str, models: dict) -> list:
         confidence_score = buy_prob - 0.5  # -0.5 to +0.5
         expected_return = confidence_score * 2 * hist_vol * (days ** 0.5) * 100  # as percentage
 
-        # Risk/reward ratio (simplified)
-        potential_gain = abs(expected_return) if expected_return > 0 else hist_vol * (days ** 0.5) * 100
-        potential_loss = hist_vol * (days ** 0.5) * 100
-        risk_reward = potential_gain / potential_loss if potential_loss > 0 else 0
+        # Risk/reward ratio
+        # Risk = 1 standard deviation move (potential loss if wrong)
+        risk = hist_vol * (days ** 0.5) * 100  # as percentage
+        
+        # Reward = expected return if prediction is correct
+        reward = abs(expected_return)
+        
+        # Risk/Reward ratio = Reward / Risk
+        # Since expected_return = confidence_score * 2 * risk,
+        # risk_reward = abs(confidence_score * 2 * risk) / risk = abs(confidence_score * 2)
+        # This is always 0-1, so let's use a different formula:
+        
+        # Better approach: Use historical average return as reward
+        # and historical volatility as risk
+        avg_return = avg_daily_return * days * 100  # average return over N days
+        
+        # For Buy: reward = expected gain, risk = potential loss
+        # For Sell: reward = expected gain (short), risk = potential loss
+        if signal == 'Buy':
+            reward = max(expected_return, 0.1)  # minimum 0.1% reward
+            risk = max(abs(avg_return), 0.1)  # use historical loss as risk
+        elif signal == 'Sell':
+            reward = max(abs(expected_return), 0.1)
+            risk = max(abs(avg_return), 0.1)
+        else:
+            reward = 0
+            risk = 1
+        
+        risk_reward = reward / risk if risk > 0 else 0
 
         emoji = {'Buy': '📈', 'Sell': '📉', 'Hold': '➡️'}
-        logger.info(f"  {emoji[signal]} {stock_code} {label}: {signal} ({buy_prob:.2%}) | Expected: {expected_return:+.2f}%")
+        logger.info(f"  {emoji[signal]} {stock_code} {label}: {signal} ({buy_prob:.2%}) | Expected: {expected_return:+.2f}% | Risk/Reward: {risk_reward:.2f}")
 
         results.append({
             'stock_code': stock_code,
@@ -202,7 +227,7 @@ def predict_stock(stock_code: str, models: dict) -> list:
 
 
 def upload_to_supabase(records: list):
-    """Upload prediction records to Supabase via upsert."""
+    """Upload prediction records to Supabase via insert (keep history)."""
     if not records:
         logger.warning("No records to upload.")
         return
@@ -232,24 +257,8 @@ def upload_to_supabase(records: list):
                 'risk_reward': record.get('risk_reward', None),
             }
 
-            # Try upsert, if conflict then update
-            try:
-                client.table('stock_predictions').upsert(
-                    upload_data,
-                    on_conflict='stock_code,prediction_date,timeframe'
-                ).execute()
-            except Exception as upsert_err:
-                if 'duplicate key' in str(upsert_err):
-                    # Delete and re-insert
-                    client.table('stock_predictions').delete().match({
-                        'stock_code': record['stock_code'],
-                        'prediction_date': record['prediction_date'],
-                        'timeframe': record['timeframe']
-                    }).execute()
-                    client.table('stock_predictions').insert(upload_data).execute()
-                else:
-                    raise upsert_err
-
+            # Always insert new record (keep history)
+            client.table('stock_predictions').insert(upload_data).execute()
             success_count += 1
             logger.info(f"  Uploaded: {record['stock_code']} {record['timeframe']}")
         except Exception as e:
