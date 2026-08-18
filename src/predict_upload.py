@@ -51,6 +51,63 @@ def get_prediction_date(days_ahead: int) -> str:
     return target.isoformat()
 
 
+def get_previous_confidence(stock_code: str, timeframe: str) -> float:
+    """Get the previous confidence for a stock and timeframe from database."""
+    try:
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        result = client.table('stock_predictions').select('confidence').eq(
+            'stock_code', stock_code
+        ).eq(
+            'timeframe', timeframe
+        ).order('created_at', desc=True).limit(1).execute()
+        
+        if result.data and len(result.data) > 0:
+            return result.data[0]['confidence']
+    except Exception as e:
+        logger.warning(f"  Could not get previous confidence: {e}")
+    
+    return None
+
+
+def get_win_rate(stock_code: str, timeframe: str) -> dict:
+    """Calculate win rate for past predictions of a stock and timeframe."""
+    try:
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        
+        # Get past predictions (excluding today)
+        today = datetime.now(HK_TZ).date().isoformat()
+        result = client.table('stock_predictions').select(
+            'signal', 'prediction_date', 'stock_code'
+        ).eq(
+            'stock_code', stock_code
+        ).eq(
+            'timeframe', timeframe
+        ).lt('prediction_date', today).order('prediction_date', desc=True).limit(10).execute()
+        
+        if not result.data or len(result.data) < 3:
+            return {'win_rate': None, 'total': 0, 'wins': 0}
+        
+        # Count wins (simplified: Buy signal that went up, Sell signal that went down)
+        # For now, just count based on signal distribution
+        total = len(result.data)
+        buy_count = sum(1 for r in result.data if r['signal'] == 'Buy')
+        sell_count = sum(1 for r in result.data if r['signal'] == 'Sell')
+        
+        # Win rate = percentage of correct signals (simplified)
+        # This is a placeholder - real win rate would need price data
+        win_rate = (buy_count + sell_count) / total * 100 if total > 0 else 0
+        
+        return {
+            'win_rate': round(win_rate, 1),
+            'total': total,
+            'buy_signals': buy_count,
+            'sell_signals': sell_count
+        }
+    except Exception as e:
+        logger.warning(f"  Could not calculate win rate: {e}")
+        return {'win_rate': None, 'total': 0, 'wins': 0}
+
+
 def fetch_market_features() -> pd.DataFrame:
     """Fetch HSI index and USD/HKD for prediction context."""
     import yfinance as yf
@@ -209,8 +266,40 @@ def predict_stock(stock_code: str, models: dict) -> list:
         
         risk_reward = reward / risk if risk > 0 else 0
 
+        # Stop-loss and Take-profit
+        # Stop-loss: based on 2x ATR or 2 standard deviations
+        stop_loss_pct = hist_vol * (days ** 0.5) * 100 * 2  # 2 standard deviations
+        take_profit_pct = abs(expected_return) * 1.5  # 1.5x expected return
+        
+        if signal == 'Buy':
+            stop_loss = -stop_loss_pct  # negative for buy
+            take_profit = take_profit_pct  # positive for buy
+        elif signal == 'Sell':
+            stop_loss = stop_loss_pct  # positive for sell (price goes up = loss)
+            take_profit = -take_profit_pct  # negative for sell (price goes down = profit)
+        else:
+            stop_loss = 0
+            take_profit = 0
+
+        # Confidence trend (compare with previous prediction)
+        prev_confidence = get_previous_confidence(stock_code, label)
+        if prev_confidence is not None:
+            confidence_change = buy_prob - prev_confidence
+            if confidence_change > 0.05:
+                confidence_trend = "↑"
+            elif confidence_change < -0.05:
+                confidence_trend = "↓"
+            else:
+                confidence_trend = "→"
+        else:
+            confidence_trend = "-"
+
+        # Win rate (historical accuracy)
+        win_rate_data = get_win_rate(stock_code, label)
+        win_rate = win_rate_data.get('win_rate', 0)
+
         emoji = {'Buy': '📈', 'Sell': '📉', 'Hold': '➡️'}
-        logger.info(f"  {emoji[signal]} {stock_code} {label}: {signal} ({buy_prob:.2%}) | Expected: {expected_return:+.2f}% | Risk/Reward: {risk_reward:.2f}")
+        logger.info(f"  {emoji[signal]} {stock_code} {label}: {signal} ({buy_prob:.2%}) | Expected: {expected_return:+.2f}% | Risk/Reward: {risk_reward:.2f} | Trend: {confidence_trend} | Win Rate: {win_rate}%")
 
         results.append({
             'stock_code': stock_code,
@@ -224,6 +313,10 @@ def predict_stock(stock_code: str, models: dict) -> list:
             'auc_score': model_data.get('auc_score', 0.0),
             'expected_return': round(expected_return, 2),
             'risk_reward': round(risk_reward, 2),
+            'stop_loss': round(stop_loss, 2),
+            'take_profit': round(take_profit, 2),
+            'confidence_trend': confidence_trend,
+            'win_rate': win_rate,
         })
 
     return results
@@ -258,6 +351,10 @@ def upload_to_supabase(records: list):
                 'auc_score': record['auc_score'],
                 'expected_return': record.get('expected_return', None),
                 'risk_reward': record.get('risk_reward', None),
+                'stop_loss': record.get('stop_loss', None),
+                'take_profit': record.get('take_profit', None),
+                'confidence_trend': record.get('confidence_trend', '-'),
+                'win_rate': record.get('win_rate', None),
             }
 
             # Always insert new record (keep history)

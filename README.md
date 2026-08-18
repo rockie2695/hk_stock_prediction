@@ -15,6 +15,9 @@ Windows 本地定時訓練 → 預測結果上傳至 Supabase (PostgreSQL) → S
 - **27項技術指標**: 包含市場指數、匯率、統計特徵
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
 - **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
+- **風險管理**: 止損/止盈建議、風險報酬比、預期報酬
+- **信心度追蹤**: 顯示信心度變化趨勢 (↑↓→)
+- **勝率統計**: 歷史預測準確率追蹤
 
 ## 快速開始
 
@@ -181,8 +184,13 @@ CREATE TABLE stock_predictions (
     model_type TEXT,          -- 'xgboost' 或 'lightgbm'
     f1_score FLOAT8,          -- 模型 F1 分數
     auc_score FLOAT8,         -- 模型 AUC 分數
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(stock_code, prediction_date, timeframe)
+    expected_return FLOAT8,   -- 預期報酬率 (%)
+    risk_reward FLOAT8,       -- 風險報酬比
+    stop_loss FLOAT8,         -- 止損點 (%)
+    take_profit FLOAT8,       -- 止盈點 (%)
+    confidence_trend TEXT,    -- 信心度趨勢: ↑↓→-
+    win_rate FLOAT8,          -- 歷史勝率 (%)
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
 

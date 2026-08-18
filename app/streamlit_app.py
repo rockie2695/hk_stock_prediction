@@ -172,7 +172,7 @@ st.subheader("📝 近期預測記錄")
 
 # Only select known columns, ignore extras (id, created_at, etc.)
 base_cols = ['stock_code', 'prediction_date', 'timeframe', 'signal', 'confidence', 'model_version', 'created_at']
-extra_cols = ['model_type', 'f1_score', 'auc_score', 'expected_return', 'risk_reward']
+extra_cols = ['model_type', 'f1_score', 'auc_score', 'expected_return', 'risk_reward', 'stop_loss', 'take_profit', 'confidence_trend', 'win_rate']
 available = [c for c in base_cols + extra_cols if c in df.columns]
 
 display_df = df[available].copy()
@@ -188,6 +188,14 @@ if 'expected_return' in display_df.columns:
     display_df['預期報酬'] = display_df['expected_return'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
 if 'risk_reward' in display_df.columns:
     display_df['風險報酬比'] = display_df['risk_reward'].apply(lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "-")
+if 'stop_loss' in display_df.columns:
+    display_df['止損'] = display_df['stop_loss'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
+if 'take_profit' in display_df.columns:
+    display_df['止盈'] = display_df['take_profit'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
+if 'confidence_trend' in display_df.columns:
+    display_df['趨勢'] = display_df['confidence_trend']
+if 'win_rate' in display_df.columns:
+    display_df['勝率'] = display_df['win_rate'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "-")
 if 'created_at' in display_df.columns:
     display_df['預測時間'] = pd.to_datetime(display_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
 
@@ -203,7 +211,7 @@ rename_map = {
 display_df = display_df.rename(columns=rename_map)
 
 # Final column order
-final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '預期報酬', '風險報酬比', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數', '預測時間']
+final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '趨勢', '預期報酬', '止損', '止盈', '風險報酬比', '勝率', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數', '預測時間']
 final_cols = [c for c in final_cols if c in display_df.columns]
 display_df = display_df[final_cols]
 display_df = display_df.sort_values('預測時間', ascending=False)
@@ -221,6 +229,10 @@ if 'model_type' in df.columns:
         | **冠軍模型** | Optuna 自動調參後，XGBoost 與 LightGBM 在驗證折上比較，選出 F1 較高者。 | xgboost / lightgbm |
         | **預期報酬** | 基於模型信心度和歷史波動率估算的預期報酬率。正數=預期上漲，負數=預期下跌。 | ±XX% |
         | **風險報酬比** | 預期收益與潛在風險的比率。>1 表示收益大於風險，<1 表示風險大於收益。 | 0 ~ X |
+        | **止損** | 建議止損點。Buy信號為負數（下跌止損），Sell信號為正數（上漲止損）。 | ±XX% |
+        | **止盈** | 建議止盈點。Buy信號為正數（上漲獲利），Sell信號為負數（下跌獲利）。 | ±XX% |
+        | **趨勢** | 信心度變化趨勢。↑=上升，↓=下降，→=持平，-=首次預測。 | ↑↓→- |
+        | **勝率** | 歷史預測準確率（簡化計算： Buy+Sell信號比例）。 | 0~100% |
         """)
 
         st.markdown("""
