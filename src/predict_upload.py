@@ -40,11 +40,14 @@ def load_models():
 
 
 def get_prediction_date(days_ahead: int) -> str:
-    """Get the prediction target date (skip weekends)."""
+    """Get the prediction target date (count only business days, skip weekends)."""
     today = datetime.now(HK_TZ).date()
-    target = today + timedelta(days=days_ahead)
-    while target.weekday() >= 5:
+    target = today
+    count = 0
+    while count < days_ahead:
         target += timedelta(days=1)
+        if target.weekday() < 5:  # Monday=0 to Friday=4
+            count += 1
     return target.isoformat()
 
 
