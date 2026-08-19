@@ -10,14 +10,25 @@ Windows 本地定時訓練 → 預測結果上傳至 Supabase (PostgreSQL) → S
 
 ## 功能特色
 
+### 核心功能
 - **多時間範圍預測**: 同時預測明日(1天)、下週(5天)、下月(20天)
 - **自動模型選擇**: Optuna 自動調參，XGBoost vs LightGBM 自動選出冠軍
 - **27項技術指標**: 包含市場指數、匯率、統計特徵
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
 - **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
-- **風險管理**: 止損/止盈建議、風險報酬比、預期報酬
+
+### 風險管理
+- **止損/止盈建議**: 基於波動率自動計算建議止損止盈點
+- **風險報酬比**: 評估潛在收益與風險的比例
+- **預期報酬**: 基於信心度和波動率估算預期報酬率
 - **信心度追蹤**: 顯示信心度變化趨勢 (↑↓→)
 - **勝率統計**: 歷史預測準確率追蹤
+
+### 模型監控
+- **數據品質檢查**: 自動檢測缺失日期、信心度分佈異常
+- **模型漂移檢測**: 監控模型性能是否下降 (>10% = 高度, >5% = 中度)
+- **信號警報**: 強勢信號自動提醒 (信心度>70% 或 預期報酬>5%)
+- **信心度校準**: 確保信心度分數可靠
 
 ## 快速開始
 
@@ -99,7 +110,6 @@ project_root/
 ├── config.py             # 讀取 .env，提供全域設定
 ├── run_daily.bat         # Windows 批次檔 (排程器用)
 ├── setup.bat             # 一鍵安裝依賴
-├── test_quick.py         # 快速測試腳本
 ├── logs/                 # 日誌資料夾
 ├── models/               # 訓練好的模型 (.pkl)
 ├── src/
@@ -109,10 +119,14 @@ project_root/
 │   ├── data_fetcher.py   # 下載港股歷史數據 (akshare/yfinance)
 │   ├── feature_engineering.py  # 27項技術指標計算
 │   ├── train_model.py    # Optuna 自動調參 + Walk-Forward 驗證
-│   └── predict_upload.py # 每日預測並上傳 Supabase
-└── app/
-    ├── __init__.py
-    └── streamlit_app.py  # Streamlit 預測儀表板
+│   ├── predict_upload.py # 每日預測並上傳 Supabase
+│   ├── cleanup_old.py    # 清理舊數據 (保留60天)
+│   └── model_monitoring.py  # 數據品質、模型漂移、警報、校準
+├── app/
+│   ├── __init__.py
+│   └── streamlit_app.py  # Streamlit 預測儀表板
+├── migrate_metrics.sql   # 資料庫遷移: 模型指標欄位
+└── migrate_quick_wins.sql # 資料庫遷移: 風險管理欄位
 ```
 
 ## 技術細節
@@ -165,6 +179,17 @@ project_root/
 | < 45% | Sell (賣出) |
 | 45% ~ 55% | Hold (持有) |
 
+### 風險管理指標
+
+| 指標 | 說明 | 計算方式 |
+|---|---|---|
+| **預期報酬** | 基於信心度和波動率估算 | `(信心度-0.5) × 2 × 波動率 × √天數` |
+| **止損點** | 建議止損位置 | `2 × 波動率 × √天數` |
+| **止盈點** | 建議止盈位置 | `1.5 × \|預期報酬\|` |
+| **風險報酬比** | 收益與風險比例 | `報酬 / 風險` |
+| **信心度趨勢** | 信心度變化方向 | ↑上升 ↓下降 →持平 |
+| **勝率** | 歷史預測準確率 | `Buy+Sell信號比例` |
+
 ### 資料來源
 - **股票數據**: akshare (主) / yfinance (備)
 - **市場指數**: yfinance (^HSI 恒生指數)
@@ -194,13 +219,55 @@ CREATE TABLE stock_predictions (
 );
 ```
 
+### 資料庫遷移
+
+執行以下 SQL 語句來添加新欄位：
+
+```sql
+-- 模型指標欄位
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS model_type TEXT;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS f1_score FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS auc_score FLOAT8;
+
+-- 風險管理欄位
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS expected_return FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS risk_reward FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS stop_loss FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS take_profit FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS confidence_trend TEXT DEFAULT '-';
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS win_rate FLOAT8;
+
+-- 移除唯一限制 (保留歷史記錄)
+ALTER TABLE stock_predictions DROP CONSTRAINT IF EXISTS unique_stock_prediction;
+```
+
+## 模型監控
+
+### 數據品質檢查
+- 檢測缺失日期 (每個時間範圍至少需要 5 筆預測)
+- 檢查信心度分佈是否合理
+- 檢測信號分佈是否異常 (某信號 >70%)
+
+### 模型漂移檢測
+- 比較最近 7 天 vs 30 天的預測準確度
+- 準確度下降 >10% = 高度警報
+- 準確度下降 >5% = 中度警報
+
+### 信號警報
+- 信心度 >70% 的強勢信號
+- 預期報酬 >5% 的高回報信號
+
+### 信心度校準
+- 監控平均信心度是否合理
+- 過度自信 (>60%) 或信心不足 (<40%) 會建議調整
+
 ## 注意事項
 
 - 所有日期時間使用香港時區 (`Asia/Hong_Kong`)
 - 特徵計算嚴禁 Look-ahead Bias（只使用當天之前的數據）
 - `.env` 檔案包含敏感資訊，請勿上傳至版本控制
 - 模型檔案 (`.pkl`) 不上傳至版本控制
-- 可重複執行 `train_model.py` 和 `predict_upload.py`，會自動覆蓋
+- 每日預測會保留歷史記錄 (自動清理 60 天前的舊數據)
 
 ## 常見問題
 
@@ -221,3 +288,18 @@ A: 約 5-10 分鐘 (取決於股票數量和 Optuna trials)
 
 ### Q: 模型會自動更新嗎？
 A: 需要手動執行 `train_model.py` 重新訓練，或設定 Windows 排程器自動執行
+
+### Q: 如何解讀止損/止盈點？
+A: 
+- Buy 信號：止損為負數 (下跌止損)，止盈為正數 (上漲獲利)
+- Sell 信號：止損為正數 (上漲止損)，止盈為負數 (下跌獲利)
+
+### Q: 模型漂移是什麼？
+A: 模型漂移是指模型預測能力隨時間下降。系統會自動檢測並提醒您重新訓練。
+
+### Q: 信心度校準有什麼用？
+A: 確保信心度分數可靠。如果模型過度自信或信心不足，系統會建議調整。
+
+## 授權
+
+本專案僅供學習和研究使用，不構成任何投資建議。投資有風險，入市需謹慎。

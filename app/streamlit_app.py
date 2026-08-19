@@ -301,6 +301,59 @@ with st.expander("🔬 模型學習的技術指標 (Features)"):
     | 45% ~ 55% | Hold (持有) |
     """)
 
+# --- Model Monitoring Section ---
+st.markdown("---")
+st.subheader("🔍 模型監控")
+
+# Import monitoring functions
+sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
+from model_monitoring import DataQualityChecker, ModelDriftDetector, AlertManager, ConfidenceCalibrator
+
+# Initialize monitoring
+checker = DataQualityChecker(client)
+drift_detector = ModelDriftDetector(client)
+alert_manager = AlertManager(client)
+calibrator = ConfidenceCalibrator(client)
+
+# Get stock codes from config
+STOCK_LIST = os.getenv('STOCK_LIST', '0700,9988,0005,0939').split(',')
+
+# Data Quality Checks
+with st.expander("📊 數據品質檢查"):
+    quality_results = checker.run_all_checks(STOCK_LIST)
+    for result in quality_results:
+        status = "✅" if result['missing_dates']['status'] == 'ok' and result['confidence_dist']['status'] == 'ok' else "⚠️"
+        st.write(f"{status} **{result['stock_code']}**: {result['missing_dates']['message']}")
+        if 'issues' in result['missing_dates']:
+            for issue in result['missing_dates']['issues']:
+                st.write(f"  - {issue}")
+
+# Model Drift Detection
+with st.expander("📉 模型漂移檢測"):
+    drift_results = drift_detector.check_all_models(STOCK_LIST)
+    for result in drift_results:
+        if result.get('drift'):
+            severity = "🔴" if result.get('severity') == 'high' else "🟡"
+            st.write(f"{severity} **{result['stock_code']}** ({result['timeframe']}): {result['message']}")
+        else:
+            st.write(f"✅ **{result['stock_code']}** ({result['timeframe']}): {result['message']}")
+
+# Signal Alerts
+with st.expander("🔔 信號警報"):
+    alerts = alert_manager.check_alerts(STOCK_LIST)
+    if alerts:
+        st.markdown(alert_manager.format_alerts(alerts))
+    else:
+        st.info("目前沒有需要關注的信號。")
+
+# Confidence Calibration
+with st.expander("🎯 信心度校準"):
+    for code in STOCK_LIST:
+        calibration = calibrator.calculate_calibration(code)
+        if calibration.get('avg_confidence'):
+            adjustment = calibrator.suggest_calibration_adjustment(calibration)
+            st.write(f"**{code}**: 平均信心度 {calibration['avg_confidence']:.1%} - {adjustment['message']}")
+
 # --- Footer ---
 st.markdown("---")
 st.caption("⚠️ 本系統僅供參考，不構成投資建議。投資有風險，入市需謹慎。")
