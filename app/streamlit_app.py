@@ -304,6 +304,7 @@ with st.expander("🔬 模型學習的技術指標 (Features)"):
 # --- Model Monitoring Section ---
 st.markdown("---")
 st.subheader("🔍 模型監控")
+st.caption("自動監控模型性能、數據品質和信號品質，確保預測可靠性")
 
 # Import monitoring functions
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
@@ -320,16 +321,31 @@ STOCK_LIST = os.getenv('STOCK_LIST', '0700,9988,0005,0939').split(',')
 
 # Data Quality Checks
 with st.expander("📊 數據品質檢查"):
+    st.info("檢查每個股票的預測數據是否完整，包括：缺失日期檢測、信心度分佈分析、信號平衡性檢查")
     quality_results = checker.run_all_checks(STOCK_LIST)
     for result in quality_results:
-        status = "✅" if result['missing_dates']['status'] == 'ok' and result['confidence_dist']['status'] == 'ok' else "⚠️"
-        st.write(f"{status} **{result['stock_code']}**: {result['missing_dates']['message']}")
+        # Check both missing_dates and confidence_dist status
+        missing_ok = result['missing_dates']['status'] == 'ok'
+        dist_ok = result['confidence_dist']['status'] == 'ok'
+        status = "✅" if missing_ok and dist_ok else "⚠️"
+        
+        st.write(f"{status} **{result['stock_code']}**")
+        
+        # Show missing dates status
+        st.write(f"  - 數據完整性: {result['missing_dates']['message']}")
         if 'issues' in result['missing_dates']:
             for issue in result['missing_dates']['issues']:
-                st.write(f"  - {issue}")
+                st.write(f"    - {issue}")
+        
+        # Show confidence distribution status
+        st.write(f"  - 信心度分佈: {result['confidence_dist']['message']}")
+        if 'issues' in result['confidence_dist']:
+            for issue in result['confidence_dist']['issues']:
+                st.write(f"    - {issue}")
 
 # Model Drift Detection
 with st.expander("📉 模型漂移檢測"):
+    st.info("比較最近7天與30天的預測準確度，檢測模型是否退化。準確度下降>10%為高度警報，>5%為中度警報")
     drift_results = drift_detector.check_all_models(STOCK_LIST)
     for result in drift_results:
         if result.get('drift'):
@@ -340,6 +356,7 @@ with st.expander("📉 模型漂移檢測"):
 
 # Signal Alerts
 with st.expander("🔔 信號警報"):
+    st.info("自動偵測強勢信號：信心度>70%的買賣信號，或預期報酬>5%的高回報機會")
     alerts = alert_manager.check_alerts(STOCK_LIST)
     if alerts:
         st.markdown(alert_manager.format_alerts(alerts))
@@ -348,11 +365,26 @@ with st.expander("🔔 信號警報"):
 
 # Confidence Calibration
 with st.expander("🎯 信心度校準"):
+    st.info("確保模型信心度分數可靠。過度自信(>60%)或信心不足(<40%)會建議調整，以提高預測準確性")
+    calibration_data = []
     for code in STOCK_LIST:
         calibration = calibrator.calculate_calibration(code)
-        if calibration.get('avg_confidence'):
+        if calibration.get('avg_confidence') is not None:
             adjustment = calibrator.suggest_calibration_adjustment(calibration)
-            st.write(f"**{code}**: 平均信心度 {calibration['avg_confidence']:.1%} - {adjustment['message']}")
+            calibration_data.append({
+                'stock_code': code,
+                'avg_confidence': calibration['avg_confidence'],
+                'std_confidence': calibration.get('std_confidence', 0),
+                'sample_size': calibration.get('sample_size', 0),
+                'message': adjustment['message']
+            })
+    
+    if calibration_data:
+        for data in calibration_data:
+            st.write(f"**{data['stock_code']}**: 平均信心度 {data['avg_confidence']:.1%} (標準差 {data['std_confidence']:.1%}) - {data['message']}")
+            st.write(f"  - 數據量: {data['sample_size']} 筆預測")
+    else:
+        st.info("數據不足，無法進行信心度校準分析。")
 
 # --- Footer ---
 st.markdown("---")

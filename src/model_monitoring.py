@@ -28,7 +28,7 @@ class DataQualityChecker:
             ).gte('prediction_date', start_date).execute()
             
             if not result.data:
-                return {'status': 'warning', 'message': f'No predictions found for {stock_code} in last {days} days'}
+                return {'status': 'warning', 'message': f'過去 {days} 天內沒有 {stock_code} 的預測記錄'}
             
             # Group by timeframe
             df = pd.DataFrame(result.data)
@@ -38,11 +38,11 @@ class DataQualityChecker:
             for tf in ['1d', '5d', '20d']:
                 count = tf_counts.get(tf, 0)
                 if count < 5:
-                    issues.append(f'{tf}: Only {count} predictions (need at least 5)')
+                    issues.append(f'{tf}: 僅有 {count} 筆預測 (至少需要 5 筆)')
             
             if issues:
-                return {'status': 'warning', 'message': 'Low prediction count', 'issues': issues}
-            return {'status': 'ok', 'message': f'Data quality OK for {stock_code}'}
+                return {'status': 'warning', 'message': '預測數量不足', 'issues': issues}
+            return {'status': 'ok', 'message': f'{stock_code} 數據品質正常'}
         except Exception as e:
             return {'status': 'error', 'message': str(e)}
     
@@ -54,7 +54,7 @@ class DataQualityChecker:
             ).eq('stock_code', stock_code).order('created_at', desc=True).limit(100).execute()
             
             if not result.data:
-                return {'status': 'warning', 'message': 'No data for analysis'}
+                return {'status': 'warning', 'message': '沒有足夠數據進行分析'}
             
             df = pd.DataFrame(result.data)
             
@@ -64,9 +64,9 @@ class DataQualityChecker:
             
             issues = []
             if extreme_high > 10:
-                issues.append(f'Too many high confidence predictions: {extreme_high}')
+                issues.append(f'過多高信心度預測: {extreme_high}')
             if extreme_low > 10:
-                issues.append(f'Too many low confidence predictions: {extreme_low}')
+                issues.append(f'過多低信心度預測: {extreme_low}')
             
             # Check signal distribution
             signal_counts = df['signal'].value_counts()
@@ -74,11 +74,11 @@ class DataQualityChecker:
             for signal, count in signal_counts.items():
                 pct = count / total * 100
                 if pct > 70:
-                    issues.append(f'{signal} signal dominance: {pct:.1f}%')
+                    issues.append(f'{signal} 信號過度集中: {pct:.1f}%')
             
             if issues:
-                return {'status': 'warning', 'message': 'Distribution issues', 'issues': issues}
-            return {'status': 'ok', 'message': 'Confidence distribution OK'}
+                return {'status': 'warning', 'message': '信心度分佈異常', 'issues': issues}
+            return {'status': 'ok', 'message': '信心度分佈正常'}
         except Exception as e:
             return {'status': 'error', 'message': str(e)}
     
@@ -142,7 +142,7 @@ class ModelDriftDetector:
             older = self.calculate_accuracy(stock_code, timeframe, days=30)
             
             if not recent['accuracy'] or not older['accuracy']:
-                return {'drift': False, 'message': 'Insufficient data'}
+                return {'drift': False, 'message': '數據不足，無法檢測漂移'}
             
             # Calculate drift
             accuracy_change = recent['accuracy'] - older['accuracy']
@@ -151,7 +151,7 @@ class ModelDriftDetector:
                 return {
                     'drift': True,
                     'severity': 'high',
-                    'message': f'Model drift detected: {accuracy_change:.1%} accuracy drop',
+                    'message': f'模型漂移警報: 準確度下降 {abs(accuracy_change):.1%}',
                     'recent_accuracy': recent['accuracy'],
                     'older_accuracy': older['accuracy']
                 }
@@ -159,14 +159,14 @@ class ModelDriftDetector:
                 return {
                     'drift': True,
                     'severity': 'medium',
-                    'message': f'Possible drift: {accuracy_change:.1%} accuracy change',
+                    'message': f'可能出現漂移: 準確度變化 {accuracy_change:.1%}',
                     'recent_accuracy': recent['accuracy'],
                     'older_accuracy': older['accuracy']
                 }
             else:
                 return {
                     'drift': False,
-                    'message': 'Model performance stable',
+                    'message': '模型性能穩定',
                     'recent_accuracy': recent['accuracy'],
                     'older_accuracy': older['accuracy']
                 }
@@ -202,7 +202,7 @@ class Backtester:
             ).eq('stock_code', stock_code).order('prediction_date', desc=True).limit(100).execute()
             
             if not result.data or len(result.data) < 10:
-                return {'error': 'Insufficient data for backtesting'}
+                return {'error': '數據不足，無法進行回測'}
             
             df = pd.DataFrame(result.data)
             
@@ -282,7 +282,7 @@ class AlertManager:
                             'confidence': pred['confidence'],
                             'expected_return': pred.get('expected_return', 0),
                             'alert_type': 'strong_signal',
-                            'message': f"Strong {pred['signal']} signal for {code} ({pred['timeframe']}) with {pred['confidence']:.1%} confidence"
+                            'message': f"{code} ({pred['timeframe']}) 出現強勢 {pred['signal']} 信號，信心度 {pred['confidence']:.1%}"
                         })
                     
                     if pred.get('expected_return', 0) and abs(pred['expected_return']) > 5:
@@ -293,7 +293,7 @@ class AlertManager:
                             'confidence': pred['confidence'],
                             'expected_return': pred['expected_return'],
                             'alert_type': 'high_return',
-                            'message': f"High expected return for {code}: {pred['expected_return']:+.1f}%"
+                            'message': f"{code} ({pred['timeframe']}) 預期報酬 {pred['expected_return']:+.1f}%"
                         })
             except Exception as e:
                 logger.error(f"Error checking alerts for {code}: {e}")
@@ -303,9 +303,9 @@ class AlertManager:
     def format_alerts(self, alerts: list) -> str:
         """Format alerts for display."""
         if not alerts:
-            return "No alerts at this time."
+            return "目前沒有需要關注的信號。"
         
-        lines = ["## 🔔 Signal Alerts\n"]
+        lines = ["## 🔔 信號警報\n"]
         for alert in alerts:
             emoji = "📈" if alert['signal'] == 'Buy' else "📉"
             lines.append(f"{emoji} **{alert['stock_code']}** ({alert['timeframe']}): {alert['signal']} - {alert['message']}")
@@ -328,7 +328,7 @@ class ConfidenceCalibrator:
             ).eq('stock_code', stock_code).order('created_at', desc=True).limit(200).execute()
             
             if not result.data or len(result.data) < 20:
-                return {'calibration_score': None, 'message': 'Insufficient data'}
+                return {'calibration_score': None, 'message': '數據不足，無法計算校準指標'}
             
             df = pd.DataFrame(result.data)
             
@@ -355,7 +355,7 @@ class ConfidenceCalibrator:
     def suggest_calibration_adjustment(self, calibration_data: dict) -> dict:
         """Suggest calibration adjustments."""
         if not calibration_data.get('avg_confidence'):
-            return {'adjustment': 0, 'message': 'No adjustment needed'}
+            return {'adjustment': 0, 'message': '無需調整'}
         
         avg = calibration_data['avg_confidence']
         
@@ -363,15 +363,15 @@ class ConfidenceCalibrator:
         if avg > 0.6:
             return {
                 'adjustment': -0.05,
-                'message': 'Model may be overconfident. Consider reducing confidence by 5%.'
+                'message': '模型可能過度自信，建議降低信心度 5%'
             }
         elif avg < 0.4:
             return {
                 'adjustment': 0.05,
-                'message': 'Model may be underconfident. Consider increasing confidence by 5%.'
+                'message': '模型可能信心不足，建議提高信心度 5%'
             }
         else:
             return {
                 'adjustment': 0,
-                'message': 'Confidence calibration looks reasonable.'
+                'message': '信心度校準正常'
             }
