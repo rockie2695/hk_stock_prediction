@@ -64,9 +64,9 @@ class DataQualityChecker:
             
             issues = []
             if extreme_high > 10:
-                issues.append(f'過多高信心度預測: {extreme_high}')
+                issues.append(f'過多高信心度預測 (>90%): {extreme_high} 筆')
             if extreme_low > 10:
-                issues.append(f'過多低信心度預測: {extreme_low}')
+                issues.append(f'過多低信心度預測 (<10%): {extreme_low} 筆')
             
             # Check signal distribution
             signal_counts = df['signal'].value_counts()
@@ -74,7 +74,8 @@ class DataQualityChecker:
             for signal, count in signal_counts.items():
                 pct = count / total * 100
                 if pct > 70:
-                    issues.append(f'{signal} 信號過度集中: {pct:.1f}%')
+                    signal_name = {'Buy': '買入', 'Sell': '賣出', 'Hold': '持有'}.get(signal, signal)
+                    issues.append(f'{signal_name} 信號過度集中: {pct:.1f}% (正常應 <70%)')
             
             if issues:
                 return {'status': 'warning', 'message': '信心度分佈異常', 'issues': issues}

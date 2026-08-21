@@ -321,7 +321,17 @@ STOCK_LIST = os.getenv('STOCK_LIST', '0700,9988,0005,0939').split(',')
 
 # Data Quality Checks
 with st.expander("📊 數據品質檢查"):
-    st.info("檢查每個股票的預測數據是否完整，包括：缺失日期檢測、信心度分佈分析、信號平衡性檢查")
+    st.info("""
+    **檢查項目：**
+    - **數據完整性**: 每個時間範圍(1d/5d/20d)至少需要5筆預測記錄
+    - **信心度分佈**: 檢查是否有極端值 (>90% 或 <10%) 過多
+    - **信號平衡性**: 檢查買入/賣出/持有信號是否過度集中 (>70%)
+    
+    **計算方式：**
+    - 統計過去30天內每個時間範圍的預測數量
+    - 計算信心度分佈，檢測極端值比例
+    - 分析信號分佈，確保各信號比例合理
+    """)
     quality_results = checker.run_all_checks(STOCK_LIST)
     for result in quality_results:
         # Check both missing_dates and confidence_dist status
@@ -345,7 +355,20 @@ with st.expander("📊 數據品質檢查"):
 
 # Model Drift Detection
 with st.expander("📉 模型漂移檢測"):
-    st.info("比較最近7天與30天的預測準確度，檢測模型是否退化。準確度下降>10%為高度警報，>5%為中度警報")
+    st.info("""
+    **檢測原理：**
+    比較最近7天與30天的平均信心度，判斷模型是否退化
+    
+    **警報等級：**
+    - 🔴 **高度警報**: 準確度下降 >10% (模型嚴重退化，需重新訓練)
+    - 🟡 **中度警報**: 準確度下降 >5% (模型可能退化，建議重新訓練)
+    - ✅ **穩定**: 準確度變化 <5% (模型正常運作)
+    
+    **計算公式：**
+    ```
+    漂移值 = 最近7天平均信心度 - 最近30天平均信心度
+    ```
+    """)
     drift_results = drift_detector.check_all_models(STOCK_LIST)
     for result in drift_results:
         if result.get('drift'):
@@ -356,7 +379,17 @@ with st.expander("📉 模型漂移檢測"):
 
 # Signal Alerts
 with st.expander("🔔 信號警報"):
-    st.info("自動偵測強勢信號：信心度>70%的買賣信號，或預期報酬>5%的高回報機會")
+    st.info("""
+    **警報條件：**
+    - **強勢信號**: 信心度 >70% 的買入或賣出信號
+    - **高回報**: 預期報酬 >5% 的投資機會
+    
+    **如何解讀：**
+    - 📈 **買入警報**: 模型強烈預期上漲，可考慮買入
+    - 📉 **賣出警報**: 模型強烈預期下跌，可考慮賣出或放空
+    
+    **注意：** 信號僅供參考，請結合其他分析判斷
+    """)
     alerts = alert_manager.check_alerts(STOCK_LIST)
     if alerts:
         st.markdown(alert_manager.format_alerts(alerts))
@@ -365,7 +398,20 @@ with st.expander("🔔 信號警報"):
 
 # Confidence Calibration
 with st.expander("🎯 信心度校準"):
-    st.info("確保模型信心度分數可靠。過度自信(>60%)或信心不足(<40%)會建議調整，以提高預測準確性")
+    st.info("""
+    **校準原理：**
+    確保模型輸出的信心度分數可靠，反映真實的預測概率
+    
+    **判斷標準：**
+    - **過度自信**: 平均信心度 >60% (模型可能高估預測能力)
+    - **信心不足**: 平均信心度 <40% (模型可能低估預測能力)
+    - **正常範圍**: 平均信心度 40%-60% (信心度可靠)
+    
+    **計算方式：**
+    - 計算每個股票最近100筆預測的平均信心度
+    - 計算標準差 (信心度穩定性)
+    - 根據平均值判斷是否需要調整
+    """)
     calibration_data = []
     for code in STOCK_LIST:
         calibration = calibrator.calculate_calibration(code)
