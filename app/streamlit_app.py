@@ -218,6 +218,43 @@ display_df = display_df.sort_values('預測時間', ascending=False)
 
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
+# Export functionality
+st.markdown("---")
+st.subheader("📥 匯出預測數據")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    # Export to CSV
+    csv_data = display_df.to_csv(index=False, encoding='utf-8-sig')
+    st.download_button(
+        label="📄 匯出 CSV",
+        data=csv_data,
+        file_name=f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        help="下載 CSV 格式，可用 Excel 或 Google Sheets 開啟"
+    )
+
+with col2:
+    # Export to Excel
+    try:
+        import openpyxl
+        from io import BytesIO
+        
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            display_df.to_excel(writer, index=False, sheet_name='預測記錄')
+        
+        st.download_button(
+            label="📊 匯出 Excel",
+            data=buffer.getvalue(),
+            file_name=f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            help="下載 Excel 格式，包含格式化的工作表"
+        )
+    except ImportError:
+        st.info("安裝 openpyxl 以啟用 Excel 匯出: `pip install openpyxl`")
+
 # Model metrics explanation
 if 'model_type' in df.columns:
     with st.expander("📖 模型指標說明"):
