@@ -1,7 +1,7 @@
 """
 Daily prediction and upload to Supabase.
 Loads 3 models (1d, 5d, 20d), predicts for all timeframes, upserts results.
-Includes market context features (HSI index, USD/HKD).
+Supports ensemble models (Voting/Stacking) and single models.
 """
 import os
 import sys
@@ -35,7 +35,8 @@ def load_models():
             continue
         with open(path, 'rb') as f:
             models[label] = pickle.load(f)
-        logger.info(f"Loaded model: {label} ({models[label]['model_type']})")
+        model_type = models[label]['model_type']
+        logger.info(f"Loaded model: {label} ({model_type})")
     return models
 
 
@@ -176,7 +177,6 @@ def predict_stock(stock_code: str, models: dict) -> list:
     # Fetch market context
     market_df = fetch_market_features()
     if not market_df.empty:
-        # Reset index to get Date column
         market_df = market_df.reset_index()
         if 'Date' not in market_df.columns:
             market_df = market_df.rename(columns={market_df.columns[0]: 'Date'})
@@ -187,21 +187,18 @@ def predict_stock(stock_code: str, models: dict) -> list:
         hsi_count = df['hsi_ret_5d'].notna().sum() if 'hsi_ret_5d' in df.columns else 0
         logger.info(f"  Market context merged. Rows with HSI data: {hsi_count}/{len(df)}")
 
-    # Get model's expected features
-    model_features = models[list(models.keys())[0]].get('feature_columns', FEATURE_COLUMNS)
-
-    # Filter to available features
-    available_features = [c for c in model_features if c in df.columns]
-    missing = [c for c in model_features if c not in df.columns]
-    if missing:
-        logger.warning(f"  Missing features for {stock_code}: {missing}")
+    # Get model's expected features (per timeframe, since each may differ)
+    all_features = set()
+    for label, model_data in models.items():
+        features = model_data.get('feature_columns', FEATURE_COLUMNS)
+        all_features.update(features)
 
     # Use the last valid row
+    available_features = [c for c in sorted(all_features) if c in df.columns]
     valid = df.dropna(subset=available_features)
     if valid.empty:
         raise ValueError(f"No valid feature data for {stock_code}")
 
-    X = valid.iloc[-1:][available_features]
     logger.info(f"  Using {len(available_features)} features for prediction")
 
     # Calculate historical volatility for expected return estimation
@@ -213,6 +210,11 @@ def predict_stock(stock_code: str, models: dict) -> list:
     for label, model_data in models.items():
         model = model_data['model']
         days = TIMEFRAMES[label]
+
+        # Per-timeframe feature alignment
+        model_features = model_data.get('feature_columns', available_features)
+        X_features = [c for c in model_features if c in valid.columns]
+        X = valid.iloc[-1:][X_features]
 
         # Predict with available features
         try:

@@ -11,12 +11,12 @@ logger = setup_logger('feature_engineering')
 # All feature columns
 FEATURE_COLUMNS = [
     # Price features
-    'ret_5d', 'ret_10d', 'ret_20d',
-    'ret_1d',
+    'ret_1d', 'ret_3d', 'ret_5d', 'ret_10d', 'ret_20d', 'ret_30d',
     'high_low_range', 'close_to_high', 'close_to_low',
     # Volume features
     'vol_ratio_5d', 'vol_ratio_10d',
     'obv_change',
+    'volume_cv',
     # RSI
     'rsi_14',
     # MACD
@@ -24,16 +24,20 @@ FEATURE_COLUMNS = [
     # Bollinger
     'bb_width',
     # ATR
-    'atr_14',
+    'atr_14', 'atr_ratio',
     # Stochastic
     'stoch_k', 'stoch_d',
     # ADX
     'adx',
     # MFI
     'mfi',
+    # Williams %R
+    'williams_r',
+    # Price position
+    'ma50_deviation',
     # Rolling statistics
     'ret_5d_skew', 'ret_5d_kurt',
-    'volatility_10d',
+    'volatility_10d', 'volatility_20d',
     # Market context (added dynamically if available)
     # 'hsi_ret_5d', 'usdhkd_change',
 ]
@@ -54,9 +58,11 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # --- Price features ---
     df['ret_1d'] = df['Close'].pct_change(1)
+    df['ret_3d'] = df['Close'].pct_change(3)
     df['ret_5d'] = df['Close'].pct_change(5)
     df['ret_10d'] = df['Close'].pct_change(10)
     df['ret_20d'] = df['Close'].pct_change(20)
+    df['ret_30d'] = df['Close'].pct_change(30)
 
     # Intraday range
     df['high_low_range'] = (df['High'] - df['Low']) / df['Close']
@@ -66,6 +72,9 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- Volume features ---
     df['vol_ratio_5d'] = df['Volume'] / df['Volume'].rolling(5).mean()
     df['vol_ratio_10d'] = df['Volume'] / df['Volume'].rolling(10).mean()
+
+    # Volume Coefficient of Variation (CV)
+    df['volume_cv'] = df['Volume'].rolling(20).std() / df['Volume'].rolling(20).mean()
 
     # OBV change
     obv = _compute_obv(df)
@@ -90,6 +99,9 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- ATR (14-day) ---
     df['atr_14'] = _compute_atr(df, period=14)
 
+    # --- ATR Ratio (ATR / Close Price) ---
+    df['atr_ratio'] = df['atr_14'] / df['Close']
+
     # --- Stochastic (14, 3, 3) ---
     stoch_k, stoch_d = _compute_stochastic(df, k_period=14, d_period=3)
     df['stoch_k'] = stoch_k
@@ -101,10 +113,17 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     # --- MFI (14) ---
     df['mfi'] = _compute_mfi(df, period=14)
 
+    # --- Williams %R (14) ---
+    df['williams_r'] = _compute_williams_r(df, period=14)
+
+    # --- Price Position: Deviation from 50-day MA ---
+    df['ma50_deviation'] = (df['Close'] - df['Close'].rolling(50).mean()) / df['Close'].rolling(50).mean()
+
     # --- Rolling statistics ---
     df['ret_5d_skew'] = df['ret_1d'].rolling(5).skew()
     df['ret_5d_kurt'] = df['ret_1d'].rolling(5).kurt()
     df['volatility_10d'] = df['ret_1d'].rolling(10).std()
+    df['volatility_20d'] = df['ret_1d'].rolling(20).std()
 
     logger.info(f"Computed {len(FEATURE_COLUMNS)} features, shape: {df.shape}")
     return df
@@ -266,3 +285,20 @@ def _compute_mfi(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
     mfi = 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
     return mfi
+
+
+def _compute_williams_r(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Compute Williams %R indicator. Range: -100 to 0."""
+    highest_high = df['High'].rolling(period).max()
+    lowest_low = df['Low'].rolling(period).min()
+    wr = -100 * (highest_high - df['Close']) / (highest_high - lowest_low).replace(0, np.nan)
+    return wr
+
+
+def add_macro_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add macro-economic features (placeholder for future expansion).
+    Currently returns the input unchanged.
+    """
+    # TODO: Add macro-economic indicators (CPI, interest rates, etc.)
+    return df

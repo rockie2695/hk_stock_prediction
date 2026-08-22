@@ -1,6 +1,6 @@
 # 港股每日自動預測系統
 
-純機器學習的港股每日預測系統，使用 XGBoost / LightGBM 進行漲跌預測，結果自動上傳至 Supabase 雲端資料庫，並透過 Streamlit 網站展示。
+純機器學習的港股每日預測系統，使用 XGBoost / LightGBM / RandomForest 集成模型進行漲跌預測，結果自動上傳至 Supabase 雲端資料庫，並透過 Streamlit 網站展示。
 
 ## 系統架構
 
@@ -12,8 +12,9 @@ Windows 本地定時訓練 → 預測結果上傳至 Supabase (PostgreSQL) → S
 
 ### 核心功能
 - **多時間範圍預測**: 同時預測明日(1天)、下週(5天)、下月(20天)
-- **自動模型選擇**: Optuna 自動調參，XGBoost vs LightGBM 自動選出冠軍
-- **27項技術指標**: 包含市場指數、匯率、統計特徵
+- **模型集成**: VotingClassifier (soft voting) / StackingClassifier，XGBoost + LightGBM + RandomForest 三模型集成
+- **SMOTE 類別平衡**: 自動處理正負樣本不平衡問題
+- **33項技術指標**: 新增動量、波動率、威廉指標、MFI 等
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
 - **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
 - **數據匯出**: 支援 CSV 和 Excel 格式匯出預測記錄
@@ -54,6 +55,11 @@ pip install -r requirements.txt
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_KEY=your-anon-key
 STOCK_LIST=0700,9988,0005,0939
+
+# 模型訓練開關
+USE_ENSEMBLE=True
+USE_STACKING=False
+USE_SMOTE=True
 ```
 
 **⚠️ 重要：** 先在 [Supabase 官網](https://supabase.com) 取得專案 URL 與金鑰，填入 `.env` 後再執行。
@@ -118,8 +124,8 @@ project_root/
 │   ├── logger.py         # 日誌設定
 │   ├── init_database.py  # 自動建表 (冪等)
 │   ├── data_fetcher.py   # 下載港股歷史數據 (akshare/yfinance)
-│   ├── feature_engineering.py  # 27項技術指標計算
-│   ├── train_model.py    # Optuna 自動調參 + Walk-Forward 驗證
+│   ├── feature_engineering.py  # 33項技術指標計算
+│   ├── train_model.py    # Optuna 自動調參 + Voting/Stacking 集成 + SMOTE
 │   ├── predict_upload.py # 每日預測並上傳 Supabase
 │   ├── cleanup_old.py    # 清理舊數據 (保留60天)
 │   └── model_monitoring.py  # 數據品質、模型漂移、警報、校準
@@ -133,35 +139,49 @@ project_root/
 ## 技術細節
 
 ### 機器學習模型
-- **演算法**: XGBoost / LightGBM
-- **超參數優化**: Optuna (50 trials per model)
-- **交叉驗證**: TimeSeriesSplit (n_splits=5)
-- **模型選擇**: 基於 F1 Score 自動選出冠軍
+- **演算法**: XGBoost + LightGBM + RandomForest 集成
+- **集成方式**: VotingClassifier (soft voting) 或 StackingClassifier (元模型 = LogisticRegression)
+- **超參數優化**: Optuna (50 trials，同時搜尋三個模型 + voting 權重)
+- **交叉驗證**: TimeSeriesSplit (n_splits=5)，嚴格遵守時序，不洩漏未來資訊
+- **類別不平衡處理**: SMOTE (僅在訓練折上套用，不跨越驗證折)
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
-- **類別權重**: 自動平衡正負樣本 (上限3倍)，避免模型偏向多數類
+- **評估指標**: F1 Score, AUC, Precision, Recall
+- **ROC 曲線**: 自動儲存至 `models/roc_curve_{timeframe}.png`
 
-### 技術指標 (27 Features)
+### 技術指標 (33 Features)
 
 | 類別 | 特徵 | 說明 |
 |---|---|---|
-| **報酬率** | `ret_1d`, `ret_5d`, `ret_10d`, `ret_20d` | 1/5/10/20日漲跌幅 |
+| **報酬率** | `ret_1d`, `ret_3d`, `ret_5d`, `ret_10d`, `ret_20d`, `ret_30d` | 1/3/5/10/20/30日漲跌幅 |
 | **價格形態** | `high_low_range`, `close_to_high`, `close_to_low` | 日內振幅、收盤位置 |
+| **價格位置** | `ma50_deviation` | 當前價格與 50 日均線乖離率 |
 | **成交量** | `vol_ratio_5d`, `vol_ratio_10d` | 量能相對強弱 |
 | **成交量** | `obv_change` | OBV (能量潮) 變化 |
+| **成交量** | `volume_cv` | 成交量變異係數 (20日) |
 | **動量** | `rsi_14` | RSI 超買/超賣 |
 | **動量** | `stoch_k`, `stoch_d` | 隨機震盪指標 |
 | **動量** | `mfi` | 資金流量指標 |
+| **動量** | `williams_r` | 威廉指標 (%R) |
 | **趨勢** | `macd_diff`, `macd_dea`, `macd_hist` | MACD 三元件 |
 | **趨勢** | `adx` | 趨勢強度 (不分方向) |
-| **波動** | `bb_width`, `atr_14` | 布林寬度、平均真實波幅 |
+| **波動** | `bb_width` | 布林通道寬度 |
+| **波動** | `atr_14`, `atr_ratio` | 平均真實波幅、ATR/收盤價比值 |
 | **統計** | `ret_5d_skew`, `ret_5d_kurt` | 報酬率偏度/峰度 |
-| **統計** | `volatility_10d` | 10日波動率 |
+| **統計** | `volatility_10d`, `volatility_20d` | 10日/20日波動率 |
 | **市場** | `hsi_ret_5d`, `hsi_ret_20d` | 恒生指數漲跌幅 |
 | **匯率** | `usdhkd_change` | 美元/港幣匯率變化 |
 
+### 模型訓練開關
+
+| 環境變數 | 預設值 | 說明 |
+|---|---|---|
+| `USE_ENSEMBLE` | `True` | 啟用三模型集成 (False = 單模型 XGBoost vs LightGBM) |
+| `USE_STACKING` | `False` | 使用 StackingClassifier (需 USE_ENSEMBLE=True) |
+| `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
+
 ### 目標變數 (Target)
 - **目標**: N天後收盤價 > 今日收盤價 → 1 (Buy)，否則 → 0
-- **類別權重**: 自動平衡正負樣本 (上限3倍)
+- **類別權重**: 自動平衡正負樣本 (上限3倍) + SMOTE 擴充
 - **多時間範圍**: 1天、5天、20天
 
 ### 模型表現 (F1 Score)
@@ -207,7 +227,7 @@ CREATE TABLE stock_predictions (
     signal TEXT CHECK (signal IN ('Buy', 'Sell', 'Hold')),
     confidence FLOAT8,
     model_version TEXT,
-    model_type TEXT,          -- 'xgboost' 或 'lightgbm'
+    model_type TEXT,          -- 'voting', 'stacking', 'xgboost', 'lightgbm'
     f1_score FLOAT8,          -- 模型 F1 分數
     auc_score FLOAT8,         -- 模型 AUC 分數
     expected_return FLOAT8,   -- 預期報酬率 (%)
@@ -277,6 +297,15 @@ A: 股票預測本身非常困難。即使是大型對沖基金，AUC 也通常�
 
 ### Q: F1 Score 代表什麼？
 A: F1 = 精準率與召回率的平衡。F1 > 0.5 表示模型比隨機好，F1 > 0.6 表示可用於交易信號。
+
+### Q: 什麼是模型集成 (Ensemble)？
+A: 同時訓練 XGBoost、LightGBM、RandomForest 三個模型，透過 VotingClassifier (soft voting) 或 StackingClassifier 結合它們的預測機率。通常比單一模型更穩定、AUC 更高。
+
+### Q: Voting 和 Stacking 有什麼差別？
+A: Voting 用加權平均結合三個模型的預測機率；Stacking 用一個元模型 (LogisticRegression) 學習如何最佳組合三個模型的預測。Stacking 通常更強但訓練較慢。
+
+### Q: SMOTE 是什麼？為什麼需要它？
+A: SMOTE (Synthetic Minority Over-sampling Technique) 在訓練集上生成少數類的合成樣本，解決正負樣本不平衡問題。僅在 TimeSeriesSplit 的訓練折上套用，不會洩漏未來資訊。
 
 ### Q: 可以添加更多股票嗎？
 A: 修改 `.env` 中的 `STOCK_LIST`，例如 `STOCK_LIST=0700,9988,0005,0939,1810`

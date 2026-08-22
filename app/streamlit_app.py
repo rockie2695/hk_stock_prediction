@@ -263,7 +263,7 @@ if 'model_type' in df.columns:
         |---|---|---|
         | **F1 分數** | 精準率與召回率的調和平均數。越高表示模型預測越準確（兼顧「預測對的」和「不漏掉」）。0.5 為隨機水平，>0.6 為可用。 | 0 ~ 1 |
         | **AUC 分數** | 模型區分漲跌的能力。0.5 = 隨機猜測，1.0 = 完美區分。衡量模型對信心度排序的品質。 | 0.5 ~ 1.0 |
-        | **冠軍模型** | Optuna 自動調參後，XGBoost 與 LightGBM 在驗證折上比較，選出 F1 較高者。 | xgboost / lightgbm |
+        | **冠軍模型** | Optuna 自動調參後，集成模型 (voting/stacking) 或單一模型的類型。 | voting / stacking / xgboost / lightgbm |
         | **預期報酬** | 基於模型信心度和歷史波動率估算的預期報酬率。正數=預期上漲，負數=預期下跌。 | ±XX% |
         | **風險報酬比** | 預期收益與潛在風險的比率。>1 表示收益大於風險，<1 表示風險大於收益。 | 0 ~ X |
         | **止損** | 建議止損點。Buy信號為負數（下跌止損），Sell信號為正數（上漲止損）。 | ±XX% |
@@ -297,22 +297,26 @@ if 'model_type' in df.columns:
 # Features explanation
 with st.expander("🔬 模型學習的技術指標 (Features)"):
     st.markdown("""
-    模型使用 **3 年歷史數據** (約 750 交易日) 訓練，從 **OHLCV** + **市場指數** 計算以下 26 項特徵：
+    模型使用 **3 年歷史數據** (約 750 交易日) 訓練，從 **OHLCV** + **市場指數** 計算以下 33 項特徵：
 
     | 類別 | 特徵名稱 | 說明 |
     |---|---|---|
-    | **報酬率** | `ret_1d`, `ret_5d`, `ret_10d`, `ret_20d` | 1/5/10/20日漲跌幅 |
+    | **報酬率** | `ret_1d`, `ret_3d`, `ret_5d`, `ret_10d`, `ret_20d`, `ret_30d` | 1/3/5/10/20/30日漲跌幅 |
     | **價格形態** | `high_low_range`, `close_to_high`, `close_to_low` | 日內振幅、收盤位置 |
+    | **價格位置** | `ma50_deviation` | 當前價格與 50 日均線乖離率 |
     | **成交量** | `vol_ratio_5d`, `vol_ratio_10d` | 量能相對強弱 |
     | **成交量** | `obv_change` | OBV (能量潮) 變化 |
+    | **成交量** | `volume_cv` | 成交量變異係數 (20日) |
     | **動量** | `rsi_14` | RSI 超買/超賣 |
     | **動量** | `stoch_k`, `stoch_d` | 隨機震盪指標 |
     | **動量** | `mfi` | 資金流量指標 |
+    | **動量** | `williams_r` | 威廉指標 (%R) |
     | **趨勢** | `macd_diff`, `macd_dea`, `macd_hist` | MACD 三元件 |
     | **趨勢** | `adx` | 趨勢強度 (不分方向) |
-    | **波動** | `bb_width`, `atr_14` | 布林寬度、平均真實波幅 |
+    | **波動** | `bb_width` | 布林通道寬度 |
+    | **波動** | `atr_14`, `atr_ratio` | 平均真實波幅、ATR/收盤價比值 |
     | **統計** | `ret_5d_skew`, `ret_5d_kurt` | 報酬率偏度/峰度 |
-    | **統計** | `volatility_10d` | 10日波動率 |
+    | **統計** | `volatility_10d`, `volatility_20d` | 10日/20日波動率 |
     | **市場** | `hsi_ret_5d`, `hsi_ret_20d` | 恒生指數漲跌幅 |
     | **匯率** | `usdhkd_change` | 美元/港幣匯率變化 |
 
@@ -322,6 +326,13 @@ with st.expander("🔬 模型學習的技術指標 (Features)"):
     | `1d` | 明日收盤 > 今日收盤 → 1 (上漲), 否則 → 0 |
     | `5d` | 5日後收盤 > 今日收盤 → 1, 否則 → 0 |
     | `20d` | 20日後收盤 > 今日收盤 → 1, 否則 → 0 |
+
+    **模型架構：**
+    | 模式 | 說明 |
+    |---|---|
+    | **Voting** | XGBoost + LightGBM + RandomForest，加權平均預測機率 |
+    | **Stacking** | 同上三個基礎模型 + LogisticRegression 元模型 |
+    | **SMOTE** | 訓練折上自動生成少數類合成樣本 |
 
     **模型表現 (F1 Score)：**
     | 時間範圍 | F1 Score | 說明 |
