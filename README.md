@@ -176,8 +176,13 @@ project_root/
 | 環境變數 | 預設值 | 說明 |
 |---|---|---|
 | `USE_ENSEMBLE` | `True` | 啟用三模型集成 (False = 單模型 XGBoost vs LightGBM) |
-| `USE_STACKING` | `False` | 使用 StackingClassifier (需 USE_ENSEMBLE=True) |
-| `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
+| `USE_STACKING` | `False` | 使用 StackingClassifier。**若設為 True，會自動強制啟用集成模式**（忽略 USE_ENSEMBLE） |
+| `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 (可與任何模式組合) |
+
+**優先級規則：**
+- `USE_STACKING=True` → 強制使用 StackingClassifier（覆寫 `USE_ENSEMBLE=False`）
+- `USE_ENSEMBLE=True` + `USE_STACKING=False` → VotingClassifier (soft voting)
+- `USE_ENSEMBLE=False` + `USE_STACKING=False` → 單一最佳模型
 
 ### 目標變數 (Target)
 - **目標**: N天後收盤價 > 今日收盤價 → 1 (Buy)，否則 → 0
@@ -302,7 +307,7 @@ A: F1 = 精準率與召回率的平衡。F1 > 0.5 表示模型比隨機好，F1 
 A: 同時訓練 XGBoost、LightGBM、RandomForest 三個模型，透過 VotingClassifier (soft voting) 或 StackingClassifier 結合它們的預測機率。通常比單一模型更穩定、AUC 更高。
 
 ### Q: Voting 和 Stacking 有什麼差別？
-A: Voting 用加權平均結合三個模型的預測機率；Stacking 用一個元模型 (LogisticRegression) 學習如何最佳組合三個模型的預測。Stacking 通常更強但訓練較慢。
+A: Voting 用加權平均結合三個模型的預測機率；Stacking 用一個元模型 (LogisticRegression) 學習如何最佳組合三個模型的預測。Stacking 通常更強但訓練較慢。若 `USE_STACKING=True`，會自動強制啟用集成模式（即使 `USE_ENSEMBLE=False`）。
 
 ### Q: SMOTE 是什麼？為什麼需要它？
 A: SMOTE (Synthetic Minority Over-sampling Technique) 在訓練集上生成少數類的合成樣本，解決正負樣本不平衡問題。僅在 TimeSeriesSplit 的訓練折上套用，不會洩漏未來資訊。

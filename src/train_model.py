@@ -2,6 +2,13 @@
 Model training - Optuna hyperparameter tuning + Walk-Forward validation.
 Supports Voting/Stacking ensemble of XGBoost, LightGBM, RandomForest.
 Includes SMOTE for class imbalance and comprehensive metrics (F1, AUC, Precision, Recall).
+
+Priority rules:
+  - USE_STACKING=True forces ensemble mode (overrides USE_ENSEMBLE=False)
+  - USE_ENSEMBLE=True + USE_STACKING=False → VotingClassifier
+  - USE_ENSEMBLE=True + USE_STACKING=True  → StackingClassifier
+  - USE_ENSEMBLE=False + USE_STACKING=False → single best model (XGBoost vs LightGBM)
+  - USE_SMOTE works with any of the above modes
 """
 import os
 import sys
@@ -326,9 +333,12 @@ def objective_ensemble(trial, X, y, tscv):
 
 def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     """Train and save model for one timeframe."""
+    # Resolve training mode: USE_STACKING overrides USE_ENSEMBLE (Stacking is a type of ensemble)
+    use_ensemble = USE_ENSEMBLE or USE_STACKING
+
     logger.info(f"\n{'='*50}")
     logger.info(f"Training model for {timeframe_label} ({days}-day ahead)")
-    logger.info(f"Ensemble: {USE_ENSEMBLE}, Stacking: {USE_STACKING}, SMOTE: {USE_SMOTE}")
+    logger.info(f"Ensemble: {use_ensemble}, Stacking: {USE_STACKING}, SMOTE: {USE_SMOTE}")
     logger.info(f"{'='*50}")
 
     data, available_features = prepare_data(stock_codes, days)
@@ -342,7 +352,7 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     tscv = TimeSeriesSplit(n_splits=5)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
-    if USE_ENSEMBLE:
+    if use_ensemble:
         # Train ensemble
         logger.info("Optuna Ensemble (50 trials)...")
         study = optuna.create_study(direction='maximize')
@@ -510,7 +520,8 @@ def train_all_models(stock_codes: list):
     """Train models for all timeframes."""
     os.makedirs(MODELS_DIR, exist_ok=True)
     logger.info("=== Multi-Timeframe Model Training ===")
-    logger.info(f"Ensemble={USE_ENSEMBLE}, Stacking={USE_STACKING}, SMOTE={USE_SMOTE}")
+    resolved_ensemble = USE_ENSEMBLE or USE_STACKING
+    logger.info(f"Ensemble={resolved_ensemble} (raw={USE_ENSEMBLE}), Stacking={USE_STACKING}, SMOTE={USE_SMOTE}")
 
     results = {}
     for label, days in TIMEFRAMES.items():

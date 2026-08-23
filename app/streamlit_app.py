@@ -331,8 +331,8 @@ with st.expander("🔬 模型學習的技術指標 (Features)"):
     | 模式 | 說明 |
     |---|---|
     | **Voting** | XGBoost + LightGBM + RandomForest，加權平均預測機率 |
-    | **Stacking** | 同上三個基礎模型 + LogisticRegression 元模型 |
-    | **SMOTE** | 訓練折上自動生成少數類合成樣本 |
+    | **Stacking** | 同上三個基礎模型 + LogisticRegression 元模型 (USE_STACKING=True 時自動強制啟用集成) |
+    | **SMOTE** | 訓練折上自動生成少數類合成樣本 (可與任何模式組合) |
 
     **模型表現 (F1 Score)：**
     | 時間範圍 | F1 Score | 說明 |
