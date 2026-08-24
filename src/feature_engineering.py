@@ -216,15 +216,10 @@ def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def _compute_obv(df: pd.DataFrame) -> pd.Series:
-    """Compute On Balance Volume."""
-    obv = pd.Series(0, index=df.index, dtype=float)
-    for i in range(1, len(df)):
-        if df['Close'].iloc[i] > df['Close'].iloc[i - 1]:
-            obv.iloc[i] = obv.iloc[i - 1] + df['Volume'].iloc[i]
-        elif df['Close'].iloc[i] < df['Close'].iloc[i - 1]:
-            obv.iloc[i] = obv.iloc[i - 1] - df['Volume'].iloc[i]
-        else:
-            obv.iloc[i] = obv.iloc[i - 1]
+    """Compute On Balance Volume (vectorized)."""
+    direction = np.sign(df['Close'].diff())
+    direction.iloc[0] = 0
+    obv = (direction * df['Volume']).cumsum()
     return obv
 
 
@@ -302,3 +297,50 @@ def add_macro_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     # TODO: Add macro-economic indicators (CPI, interest rates, etc.)
     return df
+
+
+def filter_correlated_features(df: pd.DataFrame, features: list, threshold: float = 0.9) -> list:
+    """
+    Remove highly correlated features to reduce redundancy.
+    When two features have |corr| > threshold, keep the one with higher
+    average absolute correlation to all other features (more informative).
+
+    Args:
+        df: DataFrame with feature columns
+        features: List of feature column names
+        threshold: Absolute correlation threshold (default 0.9)
+
+    Returns:
+        Reduced list of feature names
+    """
+    avail = [f for f in features if f in df.columns]
+    if len(avail) < 2:
+        return avail
+
+    corr_matrix = df[avail].corr()
+    # Guard against all-NaN (e.g. constant features)
+    if corr_matrix.isna().all().all():
+        return avail
+    corr_matrix = corr_matrix.abs()
+    # Upper triangle only
+    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+    dropped = set()
+    for col in upper.columns:
+        if col in dropped:
+            continue
+        highly_corr = upper.index[upper[col] > threshold].tolist()
+        if highly_corr:
+            # Keep the feature with higher mean correlation to all others
+            mean_corr = corr_matrix[col].mean()
+            for other in highly_corr:
+                other_mean = corr_matrix[other].mean()
+                if other_mean > mean_corr:
+                    dropped.add(col)
+                    break
+                else:
+                    dropped.add(other)
+
+    if dropped:
+        logger.info(f"  Dropped {len(dropped)} correlated features (threshold={threshold}): {sorted(dropped)}")
+    return [f for f in avail if f not in dropped]

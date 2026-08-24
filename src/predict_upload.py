@@ -224,9 +224,13 @@ def predict_stock(stock_code: str, models: dict) -> list:
             logger.error(f"  Prediction error for {stock_code} {label}: {e}")
             continue
 
-        if buy_prob > 0.55:
+        # Use optimized thresholds from training (fallback to defaults)
+        thresh_buy = model_data.get('threshold_buy', 0.55)
+        thresh_sell = model_data.get('threshold_sell', 0.45)
+
+        if buy_prob > thresh_buy:
             signal = 'Buy'
-        elif buy_prob < 0.45:
+        elif buy_prob < thresh_sell:
             signal = 'Sell'
         else:
             signal = 'Hold'

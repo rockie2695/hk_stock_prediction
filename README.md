@@ -15,6 +15,9 @@ Windows 本地定時訓練 → 預測結果上傳至 Supabase (PostgreSQL) → S
 - **模型集成**: VotingClassifier (soft voting) / StackingClassifier，XGBoost + LightGBM + RandomForest 三模型集成
 - **SMOTE 類別平衡**: 自動處理正負樣本不平衡問題
 - **33項技術指標**: 新增動量、波動率、威廉指標、MFI 等
+- **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵
+- **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45)
+- **模型版本化**: 帶時間戳的模型備份，自動保留最近 5 版，支持回滾
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
 - **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
 - **數據匯出**: 支援 CSV 和 Excel 格式匯出預測記錄
@@ -119,6 +122,10 @@ project_root/
 ├── setup.bat             # 一鍵安裝依賴
 ├── logs/                 # 日誌資料夾
 ├── models/               # 訓練好的模型 (.pkl)
+│   ├── best_model_{tf}.pkl           # 當前模型
+│   ├── best_model_{tf}_{ts}.pkl      # 版本化模型 (保留最近5版)
+│   ├── feature_importance_{tf}.csv   # 特徵重要性
+│   └── roc_curve_{tf}.png            # ROC 曲線
 ├── src/
 │   ├── __init__.py
 │   ├── logger.py         # 日誌設定
@@ -147,6 +154,10 @@ project_root/
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
 - **評估指標**: F1 Score, AUC, Precision, Recall
 - **ROC 曲線**: 自動儲存至 `models/roc_curve_{timeframe}.png`
+- **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵
+- **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45)
+- **模型版本化**: 帶時間戳備份，自動保留最近 5 版
+- **特徵重要性**: 輸出至 `models/feature_importance_{timeframe}.csv`
 
 ### 技術指標 (33 Features)
 
@@ -199,11 +210,12 @@ project_root/
 **注意**: 股票預測本身非常困難，AUC ~0.55-0.60 已是合理範圍。
 
 ### 信號判定
+- 閾值由模型自動優化 (在驗證集上搜尋最佳 F1)，以下為預設值：
 | 信心度 | 信號 |
 |---|---|
-| > 55% | Buy (買入) |
-| < 45% | Sell (賣出) |
-| 45% ~ 55% | Hold (持有) |
+| > 閾值 (優化後，預設55%) | Buy (買入) |
+| < 閾值 (優化後，預設45%) | Sell (賣出) |
+| 其餘 | Hold (持有) |
 
 ### 風險管理指標
 
@@ -320,6 +332,18 @@ A: 日誌位於 `logs/app.log`
 
 ### Q: 訓練要多久？
 A: 約 5-10 分鐘 (取決於股票數量和 Optuna trials)
+
+### Q: 什麼是特徵相關性過濾？
+A: 訓練前自動移除 |corr| > 0.9 的冗餘特徵。例如 `ret_3d` 與 `ret_1d`/`ret_5d` 高度相關，只保留最具資訊量的一個。減少噪音、加快訓練、降低過擬合。
+
+### Q: 閾值優化是什麼？
+A: 一般系統用固定閾值 (Buy > 55%, Sell < 45%)，但不同時間範圍的最佳閾值不同。系統會在驗證集上自動搜尋使 F1 最高的 Buy/Sell 閾值，訓練後存入模型。
+
+### Q: 模型版本化有什麼用？
+A: 每次訓練會保存帶時間戳的模型備份 (如 `best_model_5d_20260822_163000.pkl`)，自動保留最近 5 版。如果新模型效果不好，可以手動回滾到舊版。
+
+### Q: 特徵重要性 CSV 怎麼用？
+A: 訓練後自動輸出至 `models/feature_importance_{timeframe}.csv`。可用 Excel 開啟分析哪些特徵對模型預測最有影響，協助特徵工程優化。
 
 ### Q: 模型會自動更新嗎？
 A: 需要手動執行 `train_model.py` 重新訓練，或設定 Windows 排程器自動執行

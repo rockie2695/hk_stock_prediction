@@ -30,7 +30,7 @@ import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE
 from src.data_fetcher import fetch_stock_data
-from src.feature_engineering import compute_features, compute_target_days, compute_target_threshold, FEATURE_COLUMNS
+from src.feature_engineering import compute_features, compute_target_days, FEATURE_COLUMNS, filter_correlated_features
 from src.logger import setup_logger
 
 logger = setup_logger('train_model')
@@ -139,6 +139,9 @@ def prepare_data(stock_codes: list, days: int) -> pd.DataFrame:
             available_features.append(col)
 
     combined = combined.dropna(subset=available_features + ['target'])
+
+    # Filter highly correlated features to reduce redundancy
+    available_features = filter_correlated_features(combined, available_features, threshold=0.9)
 
     return combined, available_features
 
@@ -466,11 +469,10 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     logger.info(f"Winner: {model_type}")
     logger.info(f"  F1={best_f1:.4f}, AUC={best_auc:.4f}, Precision={precision:.4f}, Recall={recall:.4f}")
 
-    # Feature importance (for ensemble, use xgb feature importances)
+    # Feature importance
     if hasattr(best_model, 'feature_importances_'):
         importances = best_model.feature_importances_
     elif hasattr(best_model, 'estimators_'):
-        # Voting/Stacking: average importances from tree estimators
         importances = np.mean([e.feature_importances_ for e in best_model.estimators_ if hasattr(e, 'feature_importances_')], axis=0)
     else:
         importances = np.zeros(len(available_features))
@@ -483,8 +485,17 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     for _, row in importance_df.head(10).iterrows():
         logger.info(f"  {row['feature']}: {row['importance']:.4f}")
 
-    # Save
-    model_path = os.path.join(MODELS_DIR, f'best_model_{timeframe_label}.pkl')
+    # Save feature importance to CSV
+    importance_path = os.path.join(MODELS_DIR, f'feature_importance_{timeframe_label}.csv')
+    importance_df.to_csv(importance_path, index=False)
+    logger.info(f"Feature importance saved: {importance_path}")
+
+    # Optimize Buy/Sell thresholds on validation set
+    best_proba = best_model.predict_proba(X_val)[:, 1]
+    best_thresh_buy, best_thresh_sell, best_thresh_f1 = _optimize_thresholds(y_val, best_proba)
+    logger.info(f"  Optimized thresholds: Buy>{best_thresh_buy:.3f}, Sell<{best_thresh_sell:.3f} (F1={best_thresh_f1:.4f})")
+
+    # Save model with metadata + thresholds
     model_data = {
         'model': best_model,
         'model_type': model_type,
@@ -493,12 +504,66 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
         'days': days,
         'f1_score': best_f1,
         'auc_score': best_auc,
+        'threshold_buy': best_thresh_buy,
+        'threshold_sell': best_thresh_sell,
     }
+
+    # Model versioning: save timestamped version, keep last 5
+    from datetime import datetime as dt
+    import pytz
+    timestamp = dt.now(pytz.timezone('Asia/Hong_Kong')).strftime('%Y%m%d_%H%M%S')
+    versioned_path = os.path.join(MODELS_DIR, f'best_model_{timeframe_label}_{timestamp}.pkl')
+    with open(versioned_path, 'wb') as f:
+        pickle.dump(model_data, f)
+    logger.info(f"Versioned model saved: {versioned_path}")
+
+    # Always overwrite the "current" model file (used by predict_upload.py)
+    model_path = os.path.join(MODELS_DIR, f'best_model_{timeframe_label}.pkl')
     with open(model_path, 'wb') as f:
         pickle.dump(model_data, f)
-    logger.info(f"Saved: {model_path}")
+    logger.info(f"Current model saved: {model_path}")
+
+    # Cleanup: keep only last 5 versioned models per timeframe
+    _cleanup_old_models(timeframe_label, keep=5)
 
     return model_path, model_type, best_f1, best_auc
+
+
+def _optimize_thresholds(y_true, y_proba):
+    """Find optimal Buy/Sell thresholds that maximize F1 on validation set."""
+    from sklearn.metrics import f1_score
+    best_f1 = 0
+    best_buy = 0.55
+    best_sell = 0.45
+    for buy_t in np.arange(0.50, 0.70, 0.01):
+        for sell_t in np.arange(0.30, 0.50, 0.01):
+            if sell_t >= buy_t:
+                continue
+            preds = np.where(y_proba > buy_t, 1, np.where(y_proba < sell_t, 0, -1))
+            # Only evaluate on non-Hold predictions
+            mask = preds != -1
+            if mask.sum() < 10:
+                continue
+            f1 = f1_score(y_true[mask], preds[mask], zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_buy = buy_t
+                best_sell = sell_t
+    return best_buy, best_sell, best_f1
+
+
+def _cleanup_old_models(timeframe_label: str, keep: int = 5):
+    """Keep only the last N versioned model files, delete older ones."""
+    import glob
+    pattern = os.path.join(MODELS_DIR, f'best_model_{timeframe_label}_*.pkl')
+    files = sorted(glob.glob(pattern))
+    if len(files) > keep:
+        for f in files[:-keep]:
+            try:
+                os.remove(f)
+                logger.info(f"  Cleaned up old model: {os.path.basename(f)}")
+            except Exception as e:
+                logger.warning(f"  Failed to remove {f}: {e}")
 
 
 def _objective_single(train_fn, trial, X, y, tscv):

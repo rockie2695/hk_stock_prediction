@@ -89,7 +89,7 @@ st.markdown("---")
 
 for tf_label, tf_title in TIMEFRAME_LABELS.items():
     st.subheader(tf_title)
-    st.caption("信心 = 模型預測上漲的機率。>55% → Buy，<45% → Sell，其餘 → Hold")
+    st.caption("信心 = 模型預測上漲的機率。閾值由模型自動優化 (取代固定 55%/45%)")
 
     tf_df = df[df['timeframe'] == tf_label]
     if tf_df.empty:
@@ -270,6 +270,8 @@ if 'model_type' in df.columns:
         | **止盈** | 建議止盈點。Buy信號為正數（上漲獲利），Sell信號為負數（下跌獲利）。 | ±XX% |
         | **趨勢** | 信心度變化趨勢。↑=上升，↓=下降，→=持平，-=首次預測。 | ↑↓→- |
         | **勝率** | 歷史預測準確率（簡化計算： Buy+Sell信號比例）。 | 0~100% |
+
+        **注意：** Buy/Sell 信號閾值由模型自動優化，不再使用固定 55%/45%。每個時間範圍有獨立的最佳閾值。
         """)
 
         st.markdown("""

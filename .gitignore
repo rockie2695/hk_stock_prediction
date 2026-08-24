@@ -2,6 +2,8 @@
 logs/
 *.pkl
 models/*.pkl
+models/*.png
+models/*.csv
 __pycache__/
 *.pyc
 *.pyo
