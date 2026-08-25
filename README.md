@@ -140,7 +140,8 @@ project_root/
 │   ├── __init__.py
 │   └── streamlit_app.py  # Streamlit 預測儀表板
 ├── migrate_metrics.sql   # 資料庫遷移: 模型指標欄位
-└── migrate_quick_wins.sql # 資料庫遷移: 風險管理欄位
+├── migrate_quick_wins.sql # 資料庫遷移: 風險管理欄位
+└── migrate_thresholds.sql # 資料庫遷移: Buy/Sell 閾值欄位
 ```
 
 ## 技術細節
@@ -253,6 +254,8 @@ CREATE TABLE stock_predictions (
     take_profit FLOAT8,       -- 止盈點 (%)
     confidence_trend TEXT,    -- 信心度趨勢: ↑↓→-
     win_rate FLOAT8,          -- 歷史勝率 (%)
+    threshold_buy FLOAT8,     -- 優化後的 Buy 閾值 (每個時間範圍不同)
+    threshold_sell FLOAT8,    -- 優化後的 Sell 閾值 (每個時間範圍不同)
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```

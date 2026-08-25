@@ -361,6 +361,8 @@ def upload_to_supabase(records: list):
                 'take_profit': record.get('take_profit', None),
                 'confidence_trend': record.get('confidence_trend', '-'),
                 'win_rate': record.get('win_rate', None),
+                'threshold_buy': record.get('threshold_buy', 0.55),
+                'threshold_sell': record.get('threshold_sell', 0.45),
             }
 
             # Always insert new record (keep history)

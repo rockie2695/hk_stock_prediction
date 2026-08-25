@@ -140,8 +140,25 @@ fig_trend = px.line(
     },
     title='各股票預測信心度變化'
 )
-fig_trend.add_hline(y=0.55, line_dash="dash", line_color="green", annotation_text="Buy 閾值")
-fig_trend.add_hline(y=0.45, line_dash="dash", line_color="red", annotation_text="Sell 閾值")
+
+# Dynamic threshold lines from model optimization (per timeframe)
+if 'threshold_buy' in df.columns and df['threshold_buy'].notna().any():
+    # Use latest thresholds per timeframe
+    for tf in df['timeframe'].unique():
+        tf_df = df[df['timeframe'] == tf]
+        buy_th = tf_df['threshold_buy'].dropna().iloc[-1] if not tf_df['threshold_buy'].dropna().empty else 0.55
+        sell_th = tf_df['threshold_sell'].dropna().iloc[-1] if not tf_df['threshold_sell'].dropna().empty else 0.45
+        fig_trend.add_hline(y=buy_th, line_dash="dash", line_color="green",
+                           annotation_text=f"Buy 閾值 ({tf}: {buy_th:.0%})",
+                           annotation_position="top right")
+        fig_trend.add_hline(y=sell_th, line_dash="dash", line_color="red",
+                           annotation_text=f"Sell 閾值 ({tf}: {sell_th:.0%})",
+                           annotation_position="bottom right")
+else:
+    # Fallback for old data without thresholds
+    fig_trend.add_hline(y=0.55, line_dash="dash", line_color="green", annotation_text="Buy 閾值 (55%)")
+    fig_trend.add_hline(y=0.45, line_dash="dash", line_color="red", annotation_text="Sell 閾值 (45%)")
+
 fig_trend.update_layout(yaxis_tickformat='.0%')
 st.plotly_chart(fig_trend, use_container_width=True)
 
