@@ -1,6 +1,15 @@
 """
 Streamlit dashboard - reads predictions from Supabase and visualizes them.
 Supports 3 timeframes: 1d (明日), 5d (下週), 20d (下月)
+
+Dashboard features:
+- Latest signal cards with confidence and trend
+- Confidence trend chart with interactive threshold line controls
+  (select timeframe source, toggle Buy/Sell lines)
+- Signal distribution bar chart
+- Full prediction table with Buy/Sell thresholds
+- CSV/Excel export
+- Model metrics, feature importance, monitoring
 """
 import os
 import sys
@@ -125,6 +134,16 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
 # --- Confidence Trend (all timeframes) ---
 st.subheader("📊 預測信心度趨勢")
 
+# Threshold toggle controls
+col_tf, col_show_buy, col_show_sell = st.columns(3)
+with col_tf:
+    th_options = ["不顯示"] + list(df['timeframe'].unique()) if not df.empty else ["不顯示"]
+    selected_th_tf = st.selectbox("閾值來源時間範圍", th_options, key="th_timeframe")
+with col_show_buy:
+    show_buy = st.checkbox("顯示 Buy 閾值線", value=True, key="show_buy_th")
+with col_show_sell:
+    show_sell = st.checkbox("顯示 Sell 閾值線", value=True, key="show_sell_th")
+
 fig_trend = px.line(
     df,
     x='prediction_date',
@@ -141,23 +160,24 @@ fig_trend = px.line(
     title='各股票預測信心度變化'
 )
 
-# Dynamic threshold lines from model optimization (per timeframe)
-if 'threshold_buy' in df.columns and df['threshold_buy'].notna().any():
-    # Use latest thresholds per timeframe
-    for tf in df['timeframe'].unique():
-        tf_df = df[df['timeframe'] == tf]
-        buy_th = tf_df['threshold_buy'].dropna().iloc[-1] if not tf_df['threshold_buy'].dropna().empty else 0.55
-        sell_th = tf_df['threshold_sell'].dropna().iloc[-1] if not tf_df['threshold_sell'].dropna().empty else 0.45
+# Dynamic threshold lines from model optimization
+if selected_th_tf != "不顯示" and 'threshold_buy' in df.columns and df['threshold_buy'].notna().any():
+    tf_df = df[df['timeframe'] == selected_th_tf]
+    buy_th = tf_df['threshold_buy'].dropna().iloc[-1] if not tf_df['threshold_buy'].dropna().empty else 0.55
+    sell_th = tf_df['threshold_sell'].dropna().iloc[-1] if not tf_df['threshold_sell'].dropna().empty else 0.45
+    if show_buy:
         fig_trend.add_hline(y=buy_th, line_dash="dash", line_color="green",
-                           annotation_text=f"Buy 閾值 ({tf}: {buy_th:.0%})",
+                           annotation_text=f"Buy 閾值 ({selected_th_tf}: {buy_th:.0%})",
                            annotation_position="top right")
+    if show_sell:
         fig_trend.add_hline(y=sell_th, line_dash="dash", line_color="red",
-                           annotation_text=f"Sell 閾值 ({tf}: {sell_th:.0%})",
+                           annotation_text=f"Sell 閾值 ({selected_th_tf}: {sell_th:.0%})",
                            annotation_position="bottom right")
-else:
-    # Fallback for old data without thresholds
-    fig_trend.add_hline(y=0.55, line_dash="dash", line_color="green", annotation_text="Buy 閾值 (55%)")
-    fig_trend.add_hline(y=0.45, line_dash="dash", line_color="red", annotation_text="Sell 閾值 (45%)")
+elif selected_th_tf != "不顯示":
+    if show_buy:
+        fig_trend.add_hline(y=0.55, line_dash="dash", line_color="green", annotation_text="Buy (55%)")
+    if show_sell:
+        fig_trend.add_hline(y=0.45, line_dash="dash", line_color="red", annotation_text="Sell (45%)")
 
 fig_trend.update_layout(yaxis_tickformat='.0%')
 st.plotly_chart(fig_trend, use_container_width=True)
