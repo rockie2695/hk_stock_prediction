@@ -213,6 +213,10 @@ if 'confidence_trend' in display_df.columns:
     display_df['趨勢'] = display_df['confidence_trend']
 if 'win_rate' in display_df.columns:
     display_df['勝率'] = display_df['win_rate'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "-")
+if 'threshold_buy' in display_df.columns:
+    display_df['Buy 閾值'] = display_df['threshold_buy'].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "-")
+if 'threshold_sell' in display_df.columns:
+    display_df['Sell 閾值'] = display_df['threshold_sell'].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "-")
 if 'created_at' in display_df.columns:
     display_df['預測時間'] = pd.to_datetime(display_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
 
@@ -228,7 +232,7 @@ rename_map = {
 display_df = display_df.rename(columns=rename_map)
 
 # Final column order
-final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '趨勢', '預期報酬', '止損', '止盈', '風險報酬比', '勝率', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數', '預測時間']
+final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '趨勢', 'Buy 閾值', 'Sell 閾值', '預期報酬', '止損', '止盈', '風險報酬比', '勝率', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數', '預測時間']
 final_cols = [c for c in final_cols if c in display_df.columns]
 display_df = display_df[final_cols]
 display_df = display_df.sort_values('預測時間', ascending=False)
