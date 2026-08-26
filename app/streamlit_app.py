@@ -79,7 +79,7 @@ if client is None:
     st.stop()
 
 # --- Sidebar Controls ---
-days = st.slider("📅 選擇天數範圍", 7, 90, 30)
+days = st.slider("📅 選擇天數範圍", 1, 90, 30)
 df = get_predictions(days)
 
 if df.empty:
