@@ -51,15 +51,15 @@ def get_supabase_client():
 
 
 @st.cache_data(ttl=300)
-def get_predictions(days=30):
+def get_predictions(start_date_str, end_date_str):
     client = get_supabase_client()
     if client is None:
         return pd.DataFrame()
-    start_date = (datetime.now() - timedelta(days=days)).date().isoformat()
     try:
         response = client.table('stock_predictions') \
             .select('*') \
-            .gte('prediction_date', start_date) \
+            .gte('prediction_date', start_date_str) \
+            .lte('prediction_date', end_date_str) \
             .order('prediction_date', desc=True) \
             .execute()
         if response.data:
@@ -79,8 +79,15 @@ if client is None:
     st.stop()
 
 # --- Sidebar Controls ---
-days = st.slider("📅 選擇天數範圍", 1, 90, 30)
-df = get_predictions(days)
+st.sidebar.subheader("📅 日期範圍")
+col_start, col_end = st.sidebar.columns(2)
+with col_start:
+    start_date = st.date_input("開始日期", value=(datetime.now() - timedelta(days=30)).date())
+with col_end:
+    end_date = st.date_input("結束日期", value=datetime.now().date())
+
+# Clear cache to force fresh data on date change
+df = get_predictions(start_date.isoformat(), end_date.isoformat())
 
 if df.empty:
     st.info("暫無預測數據。請先執行:\n1. `python src/train_model.py` 訓練模型\n2. `python src/predict_upload.py` 生成預測")

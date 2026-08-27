@@ -323,6 +323,8 @@ def predict_stock(stock_code: str, models: dict) -> list:
             'take_profit': round(take_profit, 2),
             'confidence_trend': confidence_trend,
             'win_rate': win_rate,
+            'threshold_buy': model_data.get('threshold_buy', 0.55),
+            'threshold_sell': model_data.get('threshold_sell', 0.45),
         })
 
     return results
