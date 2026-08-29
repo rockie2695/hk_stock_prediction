@@ -31,6 +31,14 @@ CREATE TABLE IF NOT EXISTS stock_predictions (
     model_type TEXT,
     f1_score FLOAT8,
     auc_score FLOAT8,
+    expected_return FLOAT8,
+    risk_reward FLOAT8,
+    stop_loss FLOAT8,
+    take_profit FLOAT8,
+    confidence_trend TEXT DEFAULT '-',
+    win_rate FLOAT8,
+    threshold_buy FLOAT8 DEFAULT 0.55,
+    threshold_sell FLOAT8 DEFAULT 0.45,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -108,6 +116,21 @@ BEGIN
 END $$;
 """
 
+# Migration SQL for threshold columns
+MIGRATE_THRESHOLDS_SQL = """
+-- Add threshold columns for optimized Buy/Sell thresholds
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS threshold_buy FLOAT8 DEFAULT 0.55;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS threshold_sell FLOAT8 DEFAULT 0.45;
+
+-- Add risk management columns (in case missing)
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS expected_return FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS risk_reward FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS stop_loss FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS take_profit FLOAT8;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS confidence_trend TEXT DEFAULT '-';
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS win_rate FLOAT8;
+"""
+
 
 def check_table_exists(client) -> bool:
     """Check if stock_predictions table exists via REST API."""
@@ -125,6 +148,15 @@ def check_has_timeframe(client) -> bool:
     """Check if timeframe column exists by querying it."""
     try:
         response = client.table('stock_predictions').select('timeframe').limit(1).execute()
+        return True
+    except Exception:
+        return False
+
+
+def check_has_thresholds(client) -> bool:
+    """Check if threshold_buy/threshold_sell columns exist."""
+    try:
+        response = client.table('stock_predictions').select('threshold_buy').limit(1).execute()
         return True
     except Exception:
         return False
@@ -153,14 +185,23 @@ def init_database():
 
     # Table exists - check if timeframe column exists
     logger.info("Table exists. Checking timeframe column...")
-    if check_has_timeframe(client):
-        logger.info("✅ Table is up to date (has timeframe column).")
+    if not check_has_timeframe(client):
+        logger.info("⚠️  Missing 'timeframe' column. Running migration...")
+        _save_and_print_sql(MIGRATE_SQL, "migrate_table.sql")
+        logger.info("After running the migration SQL, re-run this script to verify.")
         return
 
-    # Need migration
-    logger.info("⚠️  Missing 'timeframe' column. Running migration...")
-    _save_and_print_sql(MIGRATE_SQL, "migrate_table.sql")
-    logger.info("After running the migration SQL, re-run this script to verify.")
+    logger.info("✅ Has timeframe column.")
+
+    # Check if threshold columns exist
+    logger.info("Checking threshold columns...")
+    if not check_has_thresholds(client):
+        logger.info("⚠️  Missing threshold columns. Running migration...")
+        _save_and_print_sql(MIGRATE_THRESHOLDS_SQL, "migrate_thresholds.sql")
+        logger.info("After running the migration SQL, re-run this script to verify.")
+        return
+
+    logger.info("✅ All columns present. Database is up to date.")
 
 
 def _save_and_print_sql(sql: str, filename: str):

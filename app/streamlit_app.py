@@ -87,7 +87,9 @@ with col_start:
         "開始日期", value=(datetime.now() - timedelta(days=30)).date()
     )
 with col_end:
-    end_date = st.date_input("結束日期", value=datetime.now().date())
+    end_date = st.date_input(
+        "結束日期", value=(datetime.now() + timedelta(days=30)).date()
+    )
 
 # Clear cache to force fresh data on date change
 df = get_predictions(start_date.isoformat(), end_date.isoformat())
@@ -120,21 +122,16 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
     latest = (
         tf_df.sort_values("prediction_date").groupby("stock_code").last().reset_index()
     )
-    # Show threshold info for this timeframe
+
+    # Show threshold info for this timeframe (use first stock with valid thresholds as reference)
     if "threshold_buy" in latest.columns and latest["threshold_buy"].notna().any():
-        buy_th = (
-            latest["threshold_buy"].dropna().iloc[-1]
-            if not latest["threshold_buy"].dropna().empty
-            else 0.55
-        )
-        sell_th = (
-            latest["threshold_sell"].dropna().iloc[-1]
-            if not latest["threshold_sell"].dropna().empty
-            else 0.45
-        )
-        st.caption(
-            f"信心 = 模型預測上漲的機率 | Buy 閾值: {buy_th:.0%} | Sell 閾值: {sell_th:.0%}"
-        )
+        ref = latest[latest["threshold_buy"].notna()].iloc[0] if not latest[latest["threshold_buy"].notna()].empty else None
+        if ref is not None:
+            st.caption(
+                f"信心 = 模型預測上漲的機率 | Buy 閾值: {ref['threshold_buy']:.0%} | Sell 閾值: {ref['threshold_sell']:.0%}"
+            )
+        else:
+            st.caption("信心 = 模型預測上漲的機率 | Buy 閾值: 55% | Sell 閾值: 45% (預設)")
     else:
         st.caption("信心 = 模型預測上漲的機率 | Buy 閾值: 55% | Sell 閾值: 45% (預設)")
 
