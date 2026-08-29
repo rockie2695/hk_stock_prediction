@@ -105,7 +105,6 @@ st.markdown("---")
 
 for tf_label, tf_title in TIMEFRAME_LABELS.items():
     st.subheader(tf_title)
-    st.caption("信心 = 模型預測上漲的機率。閾值由模型自動優化 (取代固定 55%/45%)")
 
     tf_df = df[df['timeframe'] == tf_label]
     if tf_df.empty:
@@ -114,6 +113,14 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
 
     # Get latest per stock
     latest = tf_df.sort_values('prediction_date').groupby('stock_code').last().reset_index()
+
+    # Show threshold info for this timeframe
+    if 'threshold_buy' in latest.columns and latest['threshold_buy'].notna().any():
+        buy_th = latest['threshold_buy'].dropna().iloc[-1] if not latest['threshold_buy'].dropna().empty else 0.55
+        sell_th = latest['threshold_sell'].dropna().iloc[-1] if not latest['threshold_sell'].dropna().empty else 0.45
+        st.caption(f"信心 = 模型預測上漲的機率 | Buy 閾值: {buy_th:.0%} | Sell 閾值: {sell_th:.0%}")
+    else:
+        st.caption("信心 = 模型預測上漲的機率 | Buy 閾值: 55% | Sell 閾值: 45% (預設)")
 
     cols = st.columns(len(latest))
     for i, (_, row) in enumerate(latest.iterrows()):
@@ -129,10 +136,19 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
                 emoji = "➡️"
                 delta_color = "off"
 
+            # Build delta with threshold context
+            conf = row['confidence']
+            if 'threshold_buy' in row and pd.notna(row['threshold_buy']):
+                buy_th = row['threshold_buy']
+                sell_th = row['threshold_sell']
+                delta_text = f"信心: {conf:.1%} | Buy>{buy_th:.0%} Sell<{sell_th:.0%}"
+            else:
+                delta_text = f"信心: {conf:.1%}"
+
             st.metric(
                 label=f"{emoji} {row['stock_code']}",
                 value=signal,
-                delta=f"信心: {row['confidence']:.1%}",
+                delta=delta_text,
                 delta_color=delta_color
             )
 
@@ -167,20 +183,25 @@ fig_trend = px.line(
     title='各股票預測信心度變化'
 )
 
-# Dynamic threshold lines from model optimization
+# Plot threshold lines from database (per day, per timeframe)
 if selected_th_tf != "不顯示" and 'threshold_buy' in df.columns and df['threshold_buy'].notna().any():
-    tf_df = df[df['timeframe'] == selected_th_tf]
-    buy_th = tf_df['threshold_buy'].dropna().iloc[-1] if not tf_df['threshold_buy'].dropna().empty else 0.55
-    sell_th = tf_df['threshold_sell'].dropna().iloc[-1] if not tf_df['threshold_sell'].dropna().empty else 0.45
-    if show_buy:
-        fig_trend.add_hline(y=buy_th, line_dash="dash", line_color="green",
-                           annotation_text=f"Buy 閾值 ({selected_th_tf}: {buy_th:.0%})",
-                           annotation_position="top right")
-    if show_sell:
-        fig_trend.add_hline(y=sell_th, line_dash="dash", line_color="red",
-                           annotation_text=f"Sell 閾值 ({selected_th_tf}: {sell_th:.0%})",
-                           annotation_position="bottom right")
+    th_df = df[df['timeframe'] == selected_th_tf].sort_values('prediction_date')
+    if show_buy and th_df['threshold_buy'].notna().any():
+        fig_trend.add_trace(go.Scatter(
+            x=th_df['prediction_date'], y=th_df['threshold_buy'],
+            mode='lines', name=f'Buy 閾值 ({selected_th_tf})',
+            line=dict(color='green', dash='dash', width=2),
+            hovertemplate='Buy 閾值: %{y:.0%}<extra></extra>'
+        ))
+    if show_sell and th_df['threshold_sell'].notna().any():
+        fig_trend.add_trace(go.Scatter(
+            x=th_df['prediction_date'], y=th_df['threshold_sell'],
+            mode='lines', name=f'Sell 閾值 ({selected_th_tf})',
+            line=dict(color='red', dash='dash', width=2),
+            hovertemplate='Sell 閾值: %{y:.0%}<extra></extra>'
+        ))
 elif selected_th_tf != "不顯示":
+    # Fallback: single horizontal lines
     if show_buy:
         fig_trend.add_hline(y=0.55, line_dash="dash", line_color="green", annotation_text="Buy (55%)")
     if show_sell:
