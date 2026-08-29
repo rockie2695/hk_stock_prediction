@@ -11,6 +11,7 @@ Dashboard features:
 - CSV/Excel export
 - Model metrics, feature importance, monitoring
 """
+
 import os
 import sys
 import pandas as pd
@@ -23,28 +24,26 @@ import plotly.graph_objects as go
 
 # Load .env from project root
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(PROJECT_ROOT, '.env'))
+load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
 
 # Page config
 st.set_page_config(
-    page_title="港股 AI 預測儀表板",
-    layout="wide",
-    initial_sidebar_state="collapsed"
+    page_title="港股 AI 預測儀表板", layout="wide", initial_sidebar_state="collapsed"
 )
 
 # Timeframe labels
 TIMEFRAME_LABELS = {
-    '1d': '📈 明日 (1天)',
-    '5d': '📊 下週 (5天)',
-    '20d': '📉 下月 (20天)'
+    "1d": "📈 明日 (1天)",
+    "5d": "📊 下週 (5天)",
+    "20d": "📉 下月 (20天)",
 }
 
 
 # --- Supabase Connection ---
 @st.cache_resource
 def get_supabase_client():
-    url = os.getenv('SUPABASE_URL')
-    key = os.getenv('SUPABASE_KEY')
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_KEY")
     if not url or not key:
         return None
     return create_client(url, key)
@@ -56,12 +55,14 @@ def get_predictions(start_date_str, end_date_str):
     if client is None:
         return pd.DataFrame()
     try:
-        response = client.table('stock_predictions') \
-            .select('*') \
-            .gte('prediction_date', start_date_str) \
-            .lte('prediction_date', end_date_str) \
-            .order('prediction_date', desc=True) \
+        response = (
+            client.table("stock_predictions")
+            .select("*")
+            .gte("prediction_date", start_date_str)
+            .lte("prediction_date", end_date_str)
+            .order("prediction_date", desc=True)
             .execute()
+        )
         if response.data:
             return pd.DataFrame(response.data)
         return pd.DataFrame()
@@ -82,7 +83,9 @@ if client is None:
 st.sidebar.subheader("📅 日期範圍")
 col_start, col_end = st.sidebar.columns(2)
 with col_start:
-    start_date = st.date_input("開始日期", value=(datetime.now() - timedelta(days=30)).date())
+    start_date = st.date_input(
+        "開始日期", value=(datetime.now() - timedelta(days=30)).date()
+    )
 with col_end:
     end_date = st.date_input("結束日期", value=datetime.now().date())
 
@@ -90,15 +93,17 @@ with col_end:
 df = get_predictions(start_date.isoformat(), end_date.isoformat())
 
 if df.empty:
-    st.info("暫無預測數據。請先執行:\n1. `python src/train_model.py` 訓練模型\n2. `python src/predict_upload.py` 生成預測")
+    st.info(
+        "暫無預測數據。請先執行:\n1. `python src/train_model.py` 訓練模型\n2. `python src/predict_upload.py` 生成預測"
+    )
     st.stop()
 
 # Ensure proper types
-df['prediction_date'] = pd.to_datetime(df['prediction_date']).dt.date
-df['confidence'] = df['confidence'].astype(float)
-df['stock_code'] = df['stock_code'].astype(str)
-if 'timeframe' not in df.columns:
-    df['timeframe'] = '1d'  # Legacy data
+df["prediction_date"] = pd.to_datetime(df["prediction_date"]).dt.date
+df["confidence"] = df["confidence"].astype(float)
+df["stock_code"] = df["stock_code"].astype(str)
+if "timeframe" not in df.columns:
+    df["timeframe"] = "1d"  # Legacy data
 
 # --- Latest Signals for Each Timeframe ---
 st.markdown("---")
@@ -106,30 +111,41 @@ st.markdown("---")
 for tf_label, tf_title in TIMEFRAME_LABELS.items():
     st.subheader(tf_title)
 
-    tf_df = df[df['timeframe'] == tf_label]
+    tf_df = df[df["timeframe"] == tf_label]
     if tf_df.empty:
         st.info(f"暫無 {tf_label} 預測數據")
         continue
 
     # Get latest per stock
-    latest = tf_df.sort_values('prediction_date').groupby('stock_code').last().reset_index()
-
+    latest = (
+        tf_df.sort_values("prediction_date").groupby("stock_code").last().reset_index()
+    )
     # Show threshold info for this timeframe
-    if 'threshold_buy' in latest.columns and latest['threshold_buy'].notna().any():
-        buy_th = latest['threshold_buy'].dropna().iloc[-1] if not latest['threshold_buy'].dropna().empty else 0.55
-        sell_th = latest['threshold_sell'].dropna().iloc[-1] if not latest['threshold_sell'].dropna().empty else 0.45
-        st.caption(f"信心 = 模型預測上漲的機率 | Buy 閾值: {buy_th:.0%} | Sell 閾值: {sell_th:.0%}")
+    if "threshold_buy" in latest.columns and latest["threshold_buy"].notna().any():
+        buy_th = (
+            latest["threshold_buy"].dropna().iloc[-1]
+            if not latest["threshold_buy"].dropna().empty
+            else 0.55
+        )
+        sell_th = (
+            latest["threshold_sell"].dropna().iloc[-1]
+            if not latest["threshold_sell"].dropna().empty
+            else 0.45
+        )
+        st.caption(
+            f"信心 = 模型預測上漲的機率 | Buy 閾值: {buy_th:.0%} | Sell 閾值: {sell_th:.0%}"
+        )
     else:
         st.caption("信心 = 模型預測上漲的機率 | Buy 閾值: 55% | Sell 閾值: 45% (預設)")
 
     cols = st.columns(len(latest))
     for i, (_, row) in enumerate(latest.iterrows()):
         with cols[i]:
-            signal = row['signal']
-            if signal == 'Buy':
+            signal = row["signal"]
+            if signal == "Buy":
                 emoji = "📈"
                 delta_color = "normal"
-            elif signal == 'Sell':
+            elif signal == "Sell":
                 emoji = "📉"
                 delta_color = "inverse"
             else:
@@ -137,10 +153,10 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
                 delta_color = "off"
 
             # Build delta with threshold context
-            conf = row['confidence']
-            if 'threshold_buy' in row and pd.notna(row['threshold_buy']):
-                buy_th = row['threshold_buy']
-                sell_th = row['threshold_sell']
+            conf = row["confidence"]
+            if "threshold_buy" in row and pd.notna(row["threshold_buy"]):
+                buy_th = row["threshold_buy"]
+                sell_th = row["threshold_sell"]
                 delta_text = f"信心: {conf:.1%} | Buy>{buy_th:.0%} Sell<{sell_th:.0%}"
             else:
                 delta_text = f"信心: {conf:.1%}"
@@ -149,7 +165,7 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
                 label=f"{emoji} {row['stock_code']}",
                 value=signal,
                 delta=delta_text,
-                delta_color=delta_color
+                delta_color=delta_color,
             )
 
     st.markdown("---")
@@ -160,7 +176,9 @@ st.subheader("📊 預測信心度趨勢")
 # Threshold toggle controls
 col_tf, col_show_buy, col_show_sell = st.columns(3)
 with col_tf:
-    th_options = ["不顯示"] + list(df['timeframe'].unique()) if not df.empty else ["不顯示"]
+    th_options = (
+        ["不顯示"] + list(df["timeframe"].unique()) if not df.empty else ["不顯示"]
+    )
     selected_th_tf = st.selectbox("閾值來源時間範圍", th_options, key="th_timeframe")
 with col_show_buy:
     show_buy = st.checkbox("顯示 Buy 閾值線", value=True, key="show_buy_th")
@@ -169,66 +187,87 @@ with col_show_sell:
 
 fig_trend = px.line(
     df,
-    x='prediction_date',
-    y='confidence',
-    color='stock_code',
-    symbol='timeframe',
+    x="prediction_date",
+    y="confidence",
+    color="stock_code",
+    symbol="timeframe",
     markers=True,
     labels={
-        'prediction_date': '日期',
-        'confidence': '信心度',
-        'stock_code': '股票代碼',
-        'timeframe': '時間範圍'
+        "prediction_date": "日期",
+        "confidence": "信心度",
+        "stock_code": "股票代碼",
+        "timeframe": "時間範圍",
     },
-    title='各股票預測信心度變化'
+    title="各股票預測信心度變化",
 )
 
 # Plot threshold lines from database (per day, per timeframe)
-if selected_th_tf != "不顯示" and 'threshold_buy' in df.columns and df['threshold_buy'].notna().any():
-    th_df = df[df['timeframe'] == selected_th_tf].sort_values('prediction_date')
-    if show_buy and th_df['threshold_buy'].notna().any():
-        fig_trend.add_trace(go.Scatter(
-            x=th_df['prediction_date'], y=th_df['threshold_buy'],
-            mode='lines', name=f'Buy 閾值 ({selected_th_tf})',
-            line=dict(color='green', dash='dash', width=2),
-            hovertemplate='Buy 閾值: %{y:.0%}<extra></extra>'
-        ))
-    if show_sell and th_df['threshold_sell'].notna().any():
-        fig_trend.add_trace(go.Scatter(
-            x=th_df['prediction_date'], y=th_df['threshold_sell'],
-            mode='lines', name=f'Sell 閾值 ({selected_th_tf})',
-            line=dict(color='red', dash='dash', width=2),
-            hovertemplate='Sell 閾值: %{y:.0%}<extra></extra>'
-        ))
+if (
+    selected_th_tf != "不顯示"
+    and "threshold_buy" in df.columns
+    and df["threshold_buy"].notna().any()
+):
+    th_df = df[df["timeframe"] == selected_th_tf].sort_values("prediction_date")
+    if show_buy and th_df["threshold_buy"].notna().any():
+        fig_trend.add_trace(
+            go.Scatter(
+                x=th_df["prediction_date"],
+                y=th_df["threshold_buy"],
+                mode="lines",
+                name=f"Buy 閾值 ({selected_th_tf})",
+                line=dict(color="green", dash="dash", width=2),
+                hovertemplate="Buy 閾值: %{y:.0%}<extra></extra>",
+            )
+        )
+    if show_sell and th_df["threshold_sell"].notna().any():
+        fig_trend.add_trace(
+            go.Scatter(
+                x=th_df["prediction_date"],
+                y=th_df["threshold_sell"],
+                mode="lines",
+                name=f"Sell 閾值 ({selected_th_tf})",
+                line=dict(color="red", dash="dash", width=2),
+                hovertemplate="Sell 閾值: %{y:.0%}<extra></extra>",
+            )
+        )
 elif selected_th_tf != "不顯示":
     # Fallback: single horizontal lines
     if show_buy:
-        fig_trend.add_hline(y=0.55, line_dash="dash", line_color="green", annotation_text="Buy (55%)")
+        fig_trend.add_hline(
+            y=0.55, line_dash="dash", line_color="green", annotation_text="Buy (55%)"
+        )
     if show_sell:
-        fig_trend.add_hline(y=0.45, line_dash="dash", line_color="red", annotation_text="Sell (45%)")
+        fig_trend.add_hline(
+            y=0.45, line_dash="dash", line_color="red", annotation_text="Sell (45%)"
+        )
 
-fig_trend.update_layout(yaxis_tickformat='.0%')
+fig_trend.update_layout(yaxis_tickformat=".0%")
 st.plotly_chart(fig_trend, use_container_width=True)
 
 # --- Signal Distribution per Timeframe ---
 st.subheader("📋 信號分佈")
-selected_tf = st.selectbox("選擇時間範圍", list(TIMEFRAME_LABELS.keys()),
-                           format_func=lambda x: TIMEFRAME_LABELS[x])
+selected_tf = st.selectbox(
+    "選擇時間範圍",
+    list(TIMEFRAME_LABELS.keys()),
+    format_func=lambda x: TIMEFRAME_LABELS[x],
+)
 
-tf_df = df[df['timeframe'] == selected_tf]
+tf_df = df[df["timeframe"] == selected_tf]
 if not tf_df.empty:
-    signal_counts = tf_df.groupby(['stock_code', 'signal']).size().reset_index(name='count')
-    signal_counts['stock_code'] = signal_counts['stock_code'].astype(str)
+    signal_counts = (
+        tf_df.groupby(["stock_code", "signal"]).size().reset_index(name="count")
+    )
+    signal_counts["stock_code"] = signal_counts["stock_code"].astype(str)
     fig_pie = px.bar(
         signal_counts,
-        x='stock_code',
-        y='count',
-        color='signal',
-        color_discrete_map={'Buy': '#2ecc71', 'Sell': '#e74c3c', 'Hold': '#95a5a6'},
-        labels={'stock_code': '股票代碼', 'count': '次數', 'signal': '信號'},
-        title=f'{TIMEFRAME_LABELS[selected_tf]} 信號分佈'
+        x="stock_code",
+        y="count",
+        color="signal",
+        color_discrete_map={"Buy": "#2ecc71", "Sell": "#e74c3c", "Hold": "#95a5a6"},
+        labels={"stock_code": "股票代碼", "count": "次數", "signal": "信號"},
+        title=f"{TIMEFRAME_LABELS[selected_tf]} 信號分佈",
     )
-    fig_pie.update_xaxes(type='category')
+    fig_pie.update_xaxes(type="category")
     st.plotly_chart(fig_pie, use_container_width=True)
 
 # --- Recent Predictions Table ---
@@ -236,54 +275,113 @@ st.markdown("---")
 st.subheader("📝 近期預測記錄")
 
 # Only select known columns, ignore extras (id, created_at, etc.)
-base_cols = ['stock_code', 'prediction_date', 'timeframe', 'signal', 'confidence', 'model_version', 'created_at']
-extra_cols = ['model_type', 'f1_score', 'auc_score', 'expected_return', 'risk_reward', 'stop_loss', 'take_profit', 'confidence_trend', 'win_rate']
+base_cols = [
+    "stock_code",
+    "prediction_date",
+    "timeframe",
+    "signal",
+    "confidence",
+    "model_version",
+    "created_at",
+]
+extra_cols = [
+    "model_type",
+    "f1_score",
+    "auc_score",
+    "expected_return",
+    "risk_reward",
+    "stop_loss",
+    "take_profit",
+    "confidence_trend",
+    "win_rate",
+    "threshold_buy",
+    "threshold_sell",
+]
 available = [c for c in base_cols + extra_cols if c in df.columns]
 
 display_df = df[available].copy()
-display_df['timeframe'] = display_df['timeframe'].map(TIMEFRAME_LABELS)
-display_df['信心度'] = display_df['confidence'].apply(lambda x: f"{x:.2%}")
-display_df = display_df.drop(columns=['confidence'])
+display_df["timeframe"] = display_df["timeframe"].map(TIMEFRAME_LABELS)
+display_df["信心度"] = display_df["confidence"].apply(lambda x: f"{x:.2%}")
+display_df = display_df.drop(columns=["confidence"])
 
-if 'f1_score' in display_df.columns:
-    display_df['F1 分數'] = display_df['f1_score'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
-if 'auc_score' in display_df.columns:
-    display_df['AUC 分數'] = display_df['auc_score'].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
-if 'expected_return' in display_df.columns:
-    display_df['預期報酬'] = display_df['expected_return'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
-if 'risk_reward' in display_df.columns:
-    display_df['風險報酬比'] = display_df['risk_reward'].apply(lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "-")
-if 'stop_loss' in display_df.columns:
-    display_df['止損'] = display_df['stop_loss'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
-if 'take_profit' in display_df.columns:
-    display_df['止盈'] = display_df['take_profit'].apply(lambda x: f"{x:+.2f}%" if pd.notna(x) else "-")
-if 'confidence_trend' in display_df.columns:
-    display_df['趨勢'] = display_df['confidence_trend']
-if 'win_rate' in display_df.columns:
-    display_df['勝率'] = display_df['win_rate'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "-")
-if 'threshold_buy' in display_df.columns:
-    display_df['Buy 閾值'] = display_df['threshold_buy'].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "-")
-if 'threshold_sell' in display_df.columns:
-    display_df['Sell 閾值'] = display_df['threshold_sell'].apply(lambda x: f"{x:.0%}" if pd.notna(x) else "-")
-if 'created_at' in display_df.columns:
-    display_df['預測時間'] = pd.to_datetime(display_df['created_at']).dt.strftime('%Y-%m-%d %H:%M')
+if "f1_score" in display_df.columns:
+    display_df["F1 分數"] = display_df["f1_score"].apply(
+        lambda x: f"{x:.4f}" if pd.notna(x) else "-"
+    )
+if "auc_score" in display_df.columns:
+    display_df["AUC 分數"] = display_df["auc_score"].apply(
+        lambda x: f"{x:.4f}" if pd.notna(x) else "-"
+    )
+if "expected_return" in display_df.columns:
+    display_df["預期報酬"] = display_df["expected_return"].apply(
+        lambda x: f"{x:+.2f}%" if pd.notna(x) else "-"
+    )
+if "risk_reward" in display_df.columns:
+    display_df["風險報酬比"] = display_df["risk_reward"].apply(
+        lambda x: f"{x:.2f}" if pd.notna(x) and x > 0 else "-"
+    )
+if "stop_loss" in display_df.columns:
+    display_df["止損"] = display_df["stop_loss"].apply(
+        lambda x: f"{x:+.2f}%" if pd.notna(x) else "-"
+    )
+if "take_profit" in display_df.columns:
+    display_df["止盈"] = display_df["take_profit"].apply(
+        lambda x: f"{x:+.2f}%" if pd.notna(x) else "-"
+    )
+if "confidence_trend" in display_df.columns:
+    display_df["趨勢"] = display_df["confidence_trend"]
+if "win_rate" in display_df.columns:
+    display_df["勝率"] = display_df["win_rate"].apply(
+        lambda x: f"{x:.1f}%" if pd.notna(x) else "-"
+    )
+if "threshold_buy" in display_df.columns:
+    display_df["Buy 閾值"] = display_df["threshold_buy"].apply(
+        lambda x: f"{x:.0%}" if pd.notna(x) else "-"
+    )
+if "threshold_sell" in display_df.columns:
+    display_df["Sell 閾值"] = display_df["threshold_sell"].apply(
+        lambda x: f"{x:.0%}" if pd.notna(x) else "-"
+    )
+if "created_at" in display_df.columns:
+    display_df["預測時間"] = pd.to_datetime(display_df["created_at"]).dt.strftime(
+        "%Y-%m-%d %H:%M"
+    )
 
 # Rename
 rename_map = {
-    'stock_code': '股票代碼',
-    'prediction_date': '預測日期',
-    'timeframe': '時間範圍',
-    'signal': '信號',
-    'model_version': '模型版本',
-    'model_type': '冠軍模型',
+    "stock_code": "股票代碼",
+    "prediction_date": "預測日期",
+    "timeframe": "時間範圍",
+    "signal": "信號",
+    "model_version": "模型版本",
+    "model_type": "冠軍模型",
 }
 display_df = display_df.rename(columns=rename_map)
 
 # Final column order
-final_cols = ['股票代碼', '預測日期', '時間範圍', '信號', '信心度', '趨勢', 'Buy 閾值', 'Sell 閾值', '預期報酬', '止損', '止盈', '風險報酬比', '勝率', '模型版本', '冠軍模型', 'F1 分數', 'AUC 分數', '預測時間']
+final_cols = [
+    "股票代碼",
+    "預測日期",
+    "時間範圍",
+    "信號",
+    "信心度",
+    "趨勢",
+    "Buy 閾值",
+    "Sell 閾值",
+    "預期報酬",
+    "止損",
+    "止盈",
+    "風險報酬比",
+    "勝率",
+    "模型版本",
+    "冠軍模型",
+    "F1 分數",
+    "AUC 分數",
+    "預測時間",
+]
 final_cols = [c for c in final_cols if c in display_df.columns]
 display_df = display_df[final_cols]
-display_df = display_df.sort_values('預測時間', ascending=False)
+display_df = display_df.sort_values("預測時間", ascending=False)
 
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 
@@ -295,13 +393,13 @@ col1, col2 = st.columns(2)
 
 with col1:
     # Export to CSV
-    csv_data = display_df.to_csv(index=False, encoding='utf-8-sig')
+    csv_data = display_df.to_csv(index=False, encoding="utf-8-sig")
     st.download_button(
         label="📄 匯出 CSV",
         data=csv_data,
         file_name=f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
-        help="下載 CSV 格式，可用 Excel 或 Google Sheets 開啟"
+        help="下載 CSV 格式，可用 Excel 或 Google Sheets 開啟",
     )
 
 with col2:
@@ -309,23 +407,23 @@ with col2:
     try:
         import openpyxl
         from io import BytesIO
-        
+
         buffer = BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            display_df.to_excel(writer, index=False, sheet_name='預測記錄')
-        
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            display_df.to_excel(writer, index=False, sheet_name="預測記錄")
+
         st.download_button(
             label="📊 匯出 Excel",
             data=buffer.getvalue(),
             file_name=f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            help="下載 Excel 格式，包含格式化的工作表"
+            help="下載 Excel 格式，包含格式化的工作表",
         )
     except ImportError:
         st.info("安裝 openpyxl 以啟用 Excel 匯出: `pip install openpyxl`")
 
 # Model metrics explanation
-if 'model_type' in df.columns:
+if "model_type" in df.columns:
     with st.expander("📖 模型指標說明"):
         st.markdown("""
         | 指標 | 說明 | 範圍 |
@@ -411,13 +509,6 @@ with st.expander("🔬 模型學習的技術指標 (Features)"):
     | 1天 | ~0.57 | 可用 — 短期趨勢 |
     | 5天 | ~0.69 | 良好 — 中期動量 |
     | 20天 | ~0.73 | 最佳 — 長期趨勢 |
-
-    **信號判定：**
-    | 信心度 | 信號 |
-    |---|---|
-    | > 55% | Buy (買入) |
-    | < 45% | Sell (賣出) |
-    | 45% ~ 55% | Hold (持有) |
     """)
 
 # --- Model Monitoring Section ---
@@ -426,8 +517,13 @@ st.subheader("🔍 模型監控")
 st.caption("自動監控模型性能、數據品質和信號品質，確保預測可靠性")
 
 # Import monitoring functions
-sys.path.insert(0, os.path.join(PROJECT_ROOT, 'src'))
-from model_monitoring import DataQualityChecker, ModelDriftDetector, AlertManager, ConfidenceCalibrator
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+from model_monitoring import (
+    DataQualityChecker,
+    ModelDriftDetector,
+    AlertManager,
+    ConfidenceCalibrator,
+)
 
 # Initialize monitoring
 checker = DataQualityChecker(client)
@@ -436,7 +532,7 @@ alert_manager = AlertManager(client)
 calibrator = ConfidenceCalibrator(client)
 
 # Get stock codes from config
-STOCK_LIST = os.getenv('STOCK_LIST', '0700,9988,0005,0939').split(',')
+STOCK_LIST = os.getenv("STOCK_LIST", "0700,9988,0005,0939").split(",")
 
 # Data Quality Checks
 with st.expander("📊 數據品質檢查"):
@@ -454,22 +550,22 @@ with st.expander("📊 數據品質檢查"):
     quality_results = checker.run_all_checks(STOCK_LIST)
     for result in quality_results:
         # Check both missing_dates and confidence_dist status
-        missing_ok = result['missing_dates']['status'] == 'ok'
-        dist_ok = result['confidence_dist']['status'] == 'ok'
+        missing_ok = result["missing_dates"]["status"] == "ok"
+        dist_ok = result["confidence_dist"]["status"] == "ok"
         status = "✅" if missing_ok and dist_ok else "⚠️"
-        
+
         st.write(f"{status} **{result['stock_code']}**")
-        
+
         # Show missing dates status
         st.write(f"  - 數據完整性: {result['missing_dates']['message']}")
-        if 'issues' in result['missing_dates']:
-            for issue in result['missing_dates']['issues']:
+        if "issues" in result["missing_dates"]:
+            for issue in result["missing_dates"]["issues"]:
                 st.write(f"    - {issue}")
-        
+
         # Show confidence distribution status
         st.write(f"  - 信心度分佈: {result['confidence_dist']['message']}")
-        if 'issues' in result['confidence_dist']:
-            for issue in result['confidence_dist']['issues']:
+        if "issues" in result["confidence_dist"]:
+            for issue in result["confidence_dist"]["issues"]:
                 st.write(f"    - {issue}")
 
 # Model Drift Detection
@@ -490,11 +586,15 @@ with st.expander("📉 模型漂移檢測"):
     """)
     drift_results = drift_detector.check_all_models(STOCK_LIST)
     for result in drift_results:
-        if result.get('drift'):
-            severity = "🔴" if result.get('severity') == 'high' else "🟡"
-            st.write(f"{severity} **{result['stock_code']}** ({result['timeframe']}): {result['message']}")
+        if result.get("drift"):
+            severity = "🔴" if result.get("severity") == "high" else "🟡"
+            st.write(
+                f"{severity} **{result['stock_code']}** ({result['timeframe']}): {result['message']}"
+            )
         else:
-            st.write(f"✅ **{result['stock_code']}** ({result['timeframe']}): {result['message']}")
+            st.write(
+                f"✅ **{result['stock_code']}** ({result['timeframe']}): {result['message']}"
+            )
 
 # Signal Alerts
 with st.expander("🔔 信號警報"):
@@ -534,19 +634,23 @@ with st.expander("🎯 信心度校準"):
     calibration_data = []
     for code in STOCK_LIST:
         calibration = calibrator.calculate_calibration(code)
-        if calibration.get('avg_confidence') is not None:
+        if calibration.get("avg_confidence") is not None:
             adjustment = calibrator.suggest_calibration_adjustment(calibration)
-            calibration_data.append({
-                'stock_code': code,
-                'avg_confidence': calibration['avg_confidence'],
-                'std_confidence': calibration.get('std_confidence', 0),
-                'sample_size': calibration.get('sample_size', 0),
-                'message': adjustment['message']
-            })
-    
+            calibration_data.append(
+                {
+                    "stock_code": code,
+                    "avg_confidence": calibration["avg_confidence"],
+                    "std_confidence": calibration.get("std_confidence", 0),
+                    "sample_size": calibration.get("sample_size", 0),
+                    "message": adjustment["message"],
+                }
+            )
+
     if calibration_data:
         for data in calibration_data:
-            st.write(f"**{data['stock_code']}**: 平均信心度 {data['avg_confidence']:.1%} (標準差 {data['std_confidence']:.1%}) - {data['message']}")
+            st.write(
+                f"**{data['stock_code']}**: 平均信心度 {data['avg_confidence']:.1%} (標準差 {data['std_confidence']:.1%}) - {data['message']}"
+            )
             st.write(f"  - 數據量: {data['sample_size']} 筆預測")
     else:
         st.info("數據不足，無法進行信心度校準分析。")
