@@ -567,7 +567,19 @@ def _cleanup_old_models(timeframe_label: str, keep: int = 5):
 
 
 def _objective_single(train_fn, trial, X, y, tscv):
-    """Optuna objective for single model."""
+    """
+    Optuna objective function for single model hyperparameter tuning.
+    
+    Args:
+        train_fn: Training function (train_xgboost or train_lightgbm)
+        trial: Optuna trial object for suggesting hyperparameters
+        X: Feature DataFrame
+        y: Target Series
+        tscv: TimeSeriesSplit cross-validator
+        
+    Returns:
+        Mean F1 score across CV folds
+    """
     scores = []
     for train_idx, val_idx in tscv.split(X):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]

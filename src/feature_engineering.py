@@ -262,22 +262,37 @@ def _compute_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
 
 
 def _compute_mfi(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    """Compute Money Flow Index (MFI)."""
+    """
+    Compute Money Flow Index (MFI) - vectorized implementation.
+    
+    MFI = 100 - (100 / (1 + positive_flow_sum / negative_flow_sum))
+    
+    Args:
+        df: DataFrame with High, Low, Close, Volume columns
+        period: Lookback period (default 14)
+        
+    Returns:
+        MFI series (0-100)
+    """
     typical_price = (df['High'] + df['Low'] + df['Close']) / 3
     money_flow = typical_price * df['Volume']
-
+    
+    # Vectorized: compare current vs previous typical price
+    price_diff = typical_price.diff()
+    
+    # Positive flow: money flow when price goes up
     positive_flow = pd.Series(0.0, index=df.index)
+    positive_flow[price_diff > 0] = money_flow[price_diff > 0]
+    
+    # Negative flow: money flow when price goes down
     negative_flow = pd.Series(0.0, index=df.index)
-
-    for i in range(1, len(df)):
-        if typical_price.iloc[i] > typical_price.iloc[i - 1]:
-            positive_flow.iloc[i] = money_flow.iloc[i]
-        elif typical_price.iloc[i] < typical_price.iloc[i - 1]:
-            negative_flow.iloc[i] = money_flow.iloc[i]
-
+    negative_flow[price_diff < 0] = money_flow[price_diff < 0]
+    
+    # Rolling sums
     pos_sum = positive_flow.rolling(period).sum()
     neg_sum = negative_flow.rolling(period).sum()
-
+    
+    # MFI formula
     mfi = 100 - (100 / (1 + pos_sum / neg_sum.replace(0, np.nan)))
     return mfi
 

@@ -8,7 +8,17 @@ import pytz
 
 # Load .env from project root
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(PROJECT_ROOT, '.env'))
+_env_path = os.path.join(PROJECT_ROOT, '.env')
+
+# Check if .env file exists before loading
+if not os.path.exists(_env_path):
+    print("ERROR: .env file not found!")
+    print(f"Please copy .env.example to .env and fill in the values:")
+    print(f"  cp .env.example .env")
+    print(f"  # Then edit .env with your Supabase credentials")
+    sys.exit(1)
+
+load_dotenv(_env_path)
 
 # Timezone
 HK_TZ = pytz.timezone('Asia/Hong_Kong')

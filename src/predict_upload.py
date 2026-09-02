@@ -6,10 +6,11 @@ Supports ensemble models (Voting/Stacking) and single models.
 import os
 import sys
 import pickle
+from typing import Optional
 import pandas as pd
 from datetime import datetime, timedelta
 import pytz
-from supabase import create_client
+from supabase import create_client, Client
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY
@@ -24,9 +25,26 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 TIMEFRAMES = {'1d': 1, '5d': 5, '20d': 20}
 
+# Module-level Supabase client (created once)
+_supabase_client: Optional[Client] = None
 
-def load_models():
-    """Load all 3 trained models."""
+
+def get_supabase_client() -> Client:
+    """Get or create a singleton Supabase client."""
+    global _supabase_client
+    if _supabase_client is None:
+        _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase_client
+
+
+def load_models() -> dict:
+    """
+    Load all 3 trained models from disk.
+    
+    Returns:
+        Dict mapping timeframe labels ('1d', '5d', '20d') to model data dicts.
+        Each model data dict contains: model, model_type, feature_columns, etc.
+    """
     models = {}
     for label in TIMEFRAMES:
         path = os.path.join(MODELS_DIR, f'best_model_{label}.pkl')
@@ -52,10 +70,18 @@ def get_prediction_date(days_ahead: int) -> str:
     return target.isoformat()
 
 
-def get_previous_confidence(stock_code: str, timeframe: str) -> float:
-    """Get the previous confidence for a stock and timeframe from database."""
+def get_previous_confidence(client: Client, stock_code: str, timeframe: str) -> Optional[float]:
+    """Get the previous confidence for a stock and timeframe from database.
+    
+    Args:
+        client: Supabase client
+        stock_code: Stock code like '0700'
+        timeframe: '1d', '5d', or '20d'
+        
+    Returns:
+        Previous confidence value or None if not found
+    """
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
         result = client.table('stock_predictions').select('confidence').eq(
             'stock_code', stock_code
         ).eq(
@@ -70,37 +96,88 @@ def get_previous_confidence(stock_code: str, timeframe: str) -> float:
     return None
 
 
-def get_win_rate(stock_code: str, timeframe: str) -> dict:
-    """Calculate win rate for past predictions of a stock and timeframe."""
-    try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+def get_win_rate(client: Client, stock_code: str, timeframe: str) -> dict:
+    """
+    Calculate win rate for past predictions by verifying actual price outcomes.
+    
+    Args:
+        client: Supabase client
+        stock_code: Stock code like '0700'
+        timeframe: '1d', '5d', or '20d'
         
-        # Get past predictions (excluding today)
+    Returns:
+        Dict with win_rate, total, wins, buy_signals, sell_signals
+    """
+    try:
+        # Get past predictions (excluding today) with their target dates
         today = datetime.now(HK_TZ).date().isoformat()
         result = client.table('stock_predictions').select(
-            'signal', 'prediction_date', 'stock_code'
+            'signal', 'prediction_date', 'timeframe'
         ).eq(
             'stock_code', stock_code
         ).eq(
             'timeframe', timeframe
-        ).lt('prediction_date', today).order('prediction_date', desc=True).limit(10).execute()
+        ).lt('prediction_date', today).order('prediction_date', desc=True).limit(30).execute()
         
         if not result.data or len(result.data) < 3:
             return {'win_rate': None, 'total': 0, 'wins': 0}
         
-        # Count wins (simplified: Buy signal that went up, Sell signal that went down)
-        # For now, just count based on signal distribution
-        total = len(result.data)
-        buy_count = sum(1 for r in result.data if r['signal'] == 'Buy')
-        sell_count = sum(1 for r in result.data if r['signal'] == 'Sell')
+        # Fetch actual price data to verify signals
+        try:
+            df = fetch_stock_data(stock_code, years=1)
+            df['Date'] = pd.to_datetime(df['Date']).dt.date
+        except Exception as e:
+            logger.warning(f"  Could not fetch price data for win rate: {e}")
+            return {'win_rate': None, 'total': 0, 'wins': 0}
         
-        # Win rate = percentage of correct signals (simplified)
-        # This is a placeholder - real win rate would need price data
-        win_rate = (buy_count + sell_count) / total * 100 if total > 0 else 0
+        total = 0
+        wins = 0
+        buy_count = 0
+        sell_count = 0
+        
+        for pred in result.data:
+            signal = pred['signal']
+            pred_date = pred['prediction_date']
+            tf = pred['timeframe']
+            
+            if signal == 'Hold':
+                continue
+            
+            total += 1
+            if signal == 'Buy':
+                buy_count += 1
+            else:
+                sell_count += 1
+            
+            # Get the timeframe days
+            days = TIMEFRAMES.get(tf, 1)
+            
+            # Find prediction date and target date in price data
+            pred_row = df[df['Date'] == pred_date]
+            if pred_row.empty:
+                continue
+            
+            pred_idx = pred_row.index[0]
+            target_idx = pred_idx + days
+            
+            if target_idx >= len(df):
+                continue
+            
+            # Check if prediction was correct
+            pred_close = df.loc[pred_idx, 'Close']
+            target_close = df.loc[target_idx, 'Close']
+            
+            if signal == 'Buy' and target_close > pred_close:
+                wins += 1
+            elif signal == 'Sell' and target_close < pred_close:
+                wins += 1
+        
+        win_rate = (wins / total * 100) if total > 0 else 0
         
         return {
             'win_rate': round(win_rate, 1),
             'total': total,
+            'wins': wins,
             'buy_signals': buy_count,
             'sell_signals': sell_count
         }
@@ -165,7 +242,18 @@ def fetch_market_features() -> pd.DataFrame:
 
 
 def predict_stock(stock_code: str, models: dict) -> list:
-    """Predict all 3 timeframes for a single stock."""
+    """
+    Predict all 3 timeframes for a single stock.
+    
+    Args:
+        stock_code: Stock code like '0700'
+        models: Dict mapping timeframe labels to model data
+        
+    Returns:
+        List of prediction records
+    """
+    client = get_supabase_client()
+    
     # Fetch stock data
     df = fetch_stock_data(stock_code, years=1)
     df = compute_features(df)
@@ -288,7 +376,7 @@ def predict_stock(stock_code: str, models: dict) -> list:
             take_profit = 0
 
         # Confidence trend (compare with previous prediction)
-        prev_confidence = get_previous_confidence(stock_code, label)
+        prev_confidence = get_previous_confidence(client, stock_code, label)
         if prev_confidence is not None:
             confidence_change = buy_prob - prev_confidence
             if confidence_change > 0.05:
@@ -301,7 +389,7 @@ def predict_stock(stock_code: str, models: dict) -> list:
             confidence_trend = "-"
 
         # Win rate (historical accuracy)
-        win_rate_data = get_win_rate(stock_code, label)
+        win_rate_data = get_win_rate(client, stock_code, label)
         win_rate = win_rate_data.get('win_rate', 0)
 
         emoji = {'Buy': '📈', 'Sell': '📉', 'Hold': '➡️'}
@@ -330,18 +418,26 @@ def predict_stock(stock_code: str, models: dict) -> list:
     return results
 
 
-def upload_to_supabase(records: list):
-    """Upload prediction records to Supabase via insert (keep history)."""
+def upload_to_supabase(records: list) -> tuple[int, int]:
+    """
+    Upload prediction records to Supabase via insert (keep history).
+    
+    Args:
+        records: List of prediction record dicts
+        
+    Returns:
+        Tuple of (success_count, fail_count)
+    """
     if not records:
         logger.warning("No records to upload.")
-        return
+        return 0, 0
 
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        client = get_supabase_client()
         logger.info(f"Connected to Supabase, uploading {len(records)} records...")
     except Exception as e:
         logger.error(f"Failed to connect to Supabase: {e}")
-        return
+        return 0, len(records)
 
     success_count = 0
     fail_count = 0
@@ -376,10 +472,16 @@ def upload_to_supabase(records: list):
             logger.error(f"  Failed: {record['stock_code']} {record['timeframe']}: {e}")
 
     logger.info(f"Upload complete: {success_count} success, {fail_count} failed")
+    return success_count, fail_count
 
 
-def predict_and_upload():
-    """Main pipeline: load all models, predict for all stocks and timeframes, upload."""
+def predict_and_upload() -> None:
+    """
+    Main pipeline: load all models, predict for all stocks and timeframes, upload to Supabase.
+    
+    Raises:
+        SystemExit: If no models found or no predictions generated
+    """
     logger.info("=== Daily Prediction Started ===")
 
     models = load_models()
@@ -400,8 +502,8 @@ def predict_and_upload():
         logger.error("No predictions generated.")
         sys.exit(1)
 
-    upload_to_supabase(all_records)
-    logger.info("=== Daily Prediction Complete ===")
+    success, fail = upload_to_supabase(all_records)
+    logger.info(f"=== Daily Prediction Complete (uploaded {success}, failed {fail}) ===")
 
 
 if __name__ == '__main__':
