@@ -1,6 +1,6 @@
 """
 Data fetcher - downloads Hong Kong stock historical daily data.
-Primary: akshare | Fallback: yfinance
+Primary: yfinance | Fallback: akshare
 Includes retry mechanism.
 """
 import time
@@ -27,20 +27,8 @@ def fetch_stock_data(stock_code: str, years: int = 3) -> pd.DataFrame:
     end_date = datetime.now(HK_TZ)
     start_date = end_date - timedelta(days=years * 365)
 
-    # Try akshare first, then yfinance
+    # Try yfinance first, then akshare
     df = None
-    for attempt in range(1, 4):
-        try:
-            df = _fetch_akshare(stock_code, start_date, end_date)
-            if df is not None and len(df) > 0:
-                logger.info(f"[akshare] {stock_code}: fetched {len(df)} rows")
-                return df
-        except Exception as e:
-            logger.warning(f"[akshare] Attempt {attempt}/3 failed for {stock_code}: {e}")
-            if attempt < 3:
-                time.sleep(5)
-
-    # Fallback to yfinance
     for attempt in range(1, 4):
         try:
             df = _fetch_yfinance(stock_code, start_date, end_date)
@@ -52,8 +40,20 @@ def fetch_stock_data(stock_code: str, years: int = 3) -> pd.DataFrame:
             if attempt < 3:
                 time.sleep(5)
 
+    # Fallback to akshare
+    for attempt in range(1, 4):
+        try:
+            df = _fetch_akshare(stock_code, start_date, end_date)
+            if df is not None and len(df) > 0:
+                logger.info(f"[akshare] {stock_code}: fetched {len(df)} rows")
+                return df
+        except Exception as e:
+            logger.warning(f"[akshare] Attempt {attempt}/3 failed for {stock_code}: {e}")
+            if attempt < 3:
+                time.sleep(5)
+
     raise RuntimeError(
-        f"Failed to fetch data for {stock_code} after 3 attempts with both akshare and yfinance."
+        f"Failed to fetch data for {stock_code} after 3 attempts with both yfinance and akshare."
     )
 
 
