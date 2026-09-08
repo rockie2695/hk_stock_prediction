@@ -5,6 +5,7 @@ Run with: streamlit run app/streamlit_app.py (appears in sidebar nav)
 import os
 import sys
 from datetime import datetime, timedelta
+import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -14,8 +15,11 @@ import plotly.graph_objects as go
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, PROJECT_ROOT)
 
-from config import STOCK_LIST
-from src.simulator import simulate_investment, SimulationResult
+from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY
+from src.simulator import (
+    simulate_investment, simulate_all_stocks, simulate_portfolio,
+    simulate_with_confidence_weighting, monte_carlo_test, SimulationResult,
+)
 
 # Page config
 st.set_page_config(
@@ -73,6 +77,30 @@ optimize_timing = st.sidebar.checkbox(
     value=False,
     help="假設預知未來N天價格，選最佳買賣日（僅5d/20d有效）",
     key="sim_optimize",
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔬 進階功能")
+
+show_portfolio = st.sidebar.checkbox(
+    "📊 組合模擬",
+    value=False,
+    help="模擬所有選中股票的組合表現（資金平均分配）",
+    key="chk_portfolio",
+)
+
+show_confidence = st.sidebar.checkbox(
+    "🎯 信心度加權",
+    value=False,
+    help="根據信號信心度調整倉位大小（高信心=大倉位）",
+    key="chk_confidence",
+)
+
+show_monte_carlo = st.sidebar.checkbox(
+    "🎲 蒙地卡羅測試",
+    value=False,
+    help="隨機翻轉信號1000次，測試策略穩健性",
+    key="chk_monte_carlo",
 )
 
 run_simulation = st.sidebar.button("🚀 開始模擬", type="primary", use_container_width=True)
@@ -137,6 +165,54 @@ if run_simulation:
         'optimize_timing': optimize_timing,
     }
 
+    # Run advanced features if selected
+    if show_portfolio and len(selected_stocks) > 1:
+        with st.spinner("📊 模擬組合表現..."):
+            portfolio_result = simulate_portfolio(
+                stock_codes=selected_stocks,
+                start_date=start_date.isoformat(),
+                end_date=end_date.isoformat(),
+                total_capital=initial_capital * len(selected_stocks),
+                timeframe=timeframe,
+                optimize_timing=optimize_timing,
+            )
+            if portfolio_result:
+                st.session_state['sim_portfolio'] = portfolio_result
+
+    if show_confidence:
+        confidence_results = {}
+        with st.spinner("🎯 模擬信心度加權策略..."):
+            for code in selected_stocks:
+                conf_result = simulate_with_confidence_weighting(
+                    stock_code=code,
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                    initial_capital=initial_capital,
+                    timeframe=timeframe,
+                )
+                if conf_result is not None:
+                    confidence_results[code] = conf_result
+        if confidence_results:
+            st.session_state['sim_confidence'] = confidence_results
+
+    if show_monte_carlo:
+        mc_results = {}
+        with st.spinner("🎲 執行蒙地卡羅測試 (1000次模擬)..."):
+            for code in selected_stocks:
+                mc_result = monte_carlo_test(
+                    stock_code=code,
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                    initial_capital=initial_capital,
+                    timeframe=timeframe,
+                    n_simulations=1000,
+                    flip_probability=0.2,
+                )
+                if 'error' not in mc_result:
+                    mc_results[code] = mc_result
+        if mc_results:
+            st.session_state['sim_monte_carlo'] = mc_results
+
 # --- Display Results ---
 if 'sim_results' in st.session_state and st.session_state['sim_results']:
     results = st.session_state['sim_results']
@@ -152,11 +228,15 @@ if 'sim_results' in st.session_state and st.session_state['sim_results']:
         total_return = ((total_final - total_initial) / total_initial) * 100 if total_initial > 0 else 0
         total_trades = sum(r.total_trades for r in res.values())
         total_wins = sum(r.wins for r in res.values())
-        total_sells = sum(r.sell_trades for r in res.values())
-        overall_win_rate = (total_wins / total_sells * 100) if total_sells > 0 else 0
+        total_losses = sum(r.losses for r in res.values())
+        overall_win_rate = (total_wins / (total_wins + total_losses) * 100) if (total_wins + total_losses) > 0 else 0
         max_dd = max((r.max_drawdown_pct for r in res.values()), default=0)
+        avg_sharpe = np.mean([r.sharpe_ratio for r in res.values()]) if res else 0
+        avg_sortino = np.mean([r.sortino_ratio for r in res.values()]) if res else 0
+        avg_pf = np.mean([r.profit_factor for r in res.values() if r.profit_factor < 999]) if res else 0
+        avg_hold = np.mean([r.avg_holding_days for r in res.values() if r.avg_holding_days > 0]) if res else 0
 
-        # Summary cards
+        # Summary cards row 1
         c1, c2, c3, c4, c5 = st.columns(5)
         with c1:
             color = "normal" if total_pnl >= 0 else "inverse"
@@ -176,21 +256,54 @@ if 'sim_results' in st.session_state and st.session_state['sim_results']:
         with c5:
             st.metric("總交易成本", f"HKD {sum(r.total_commission + r.total_stamp_duty for r in res.values()):,.0f}")
 
+        # Summary cards row 2 (risk metrics)
+        st.markdown("##### 📐 風險指標")
+        r1, r2, r3, r4 = st.columns(4)
+        with r1:
+            st.metric("Sharpe Ratio", f"{avg_sharpe:.2f}",
+                       help="年化風險調整報酬率。>1 表示不錯，>2 表示很好，<0 表示不如無風險投資")
+        with r2:
+            st.metric("Sortino Ratio", f"{avg_sortino:.2f}",
+                       help="只考慮下跌風險的風險調整報酬率。比 Sharpe 更專注於下行風險")
+        with r3:
+            st.metric("利潤因子", f"{avg_pf:.2f}",
+                       help="總盈利 / 總虧損。>1 表示盈利大於虧損，>2 表示很好")
+        with r4:
+            st.metric("平均持倉天數", f"{avg_hold:.1f} 天",
+                       help="每次買入到賣出的平均天數")
+
+        # Benchmark comparison
+        benchmarks = [r.benchmark for r in res.values() if r.benchmark is not None]
+        if benchmarks:
+            st.markdown("##### 📊 對比基準 (買入持有)")
+            b1, b2, b3 = st.columns(3)
+            bh_return = np.mean([b.total_return_pct for b in benchmarks])
+            with b1:
+                st.metric("策略平均報酬", f"{total_return / len(res):+.1f}%")
+            with b2:
+                st.metric("買入持有報酬", f"{bh_return:+.1f}%")
+            with b3:
+                alpha = (total_return / len(res)) - bh_return
+                color = "normal" if alpha >= 0 else "inverse"
+                st.metric("超額報酬 (Alpha)", f"{alpha:+.1f}%", delta_color=color,
+                           help="策略報酬 - 買入持有報酬。正數表示策略跑贏大盤")
+
         # Per-stock breakdown
         if show_detail:
             st.markdown("##### 📋 各股票表現")
             rows = []
             for code, r in res.items():
                 pnl = r.final_value - r.initial_capital
+                bh_return = r.benchmark.total_return_pct if r.benchmark else 0
                 rows.append({
                     "股票代碼": code,
                     "初始資金": f"HKD {r.initial_capital:,.0f}",
                     "最終價值": f"HKD {r.final_value:,.0f}",
                     "盈虧": f"HKD {pnl:+,.0f}",
                     "報酬率": f"{r.total_return_pct:+.1f}%",
-                    "買入次數": r.buy_trades,
-                    "賣出次數": r.sell_trades,
+                    "買入持有": f"{bh_return:+.1f}%",
                     "勝率": f"{r.win_rate:.1f}%",
+                    "Sharpe": f"{r.sharpe_ratio:.2f}",
                     "最大回撤": f"{r.max_drawdown_pct:.1f}%",
                     "交易成本": f"HKD {r.total_commission + r.total_stamp_duty:,.0f}",
                 })
@@ -207,7 +320,7 @@ if 'sim_results' in st.session_state and st.session_state['sim_results']:
                     "價格": f"{t.price:.2f}",
                     "股數": t.shares,
                     "交易成本": f"HKD {t.cost:.2f}",
-                    "盈虧": f"HKD {t.pnl:+,.2f}" if t.action == "Sell" else "-",
+                    "盈虧": f"HKD {t.pnl:+,.2f}" if t.action in ("Sell", "Hold") else "-",
                 })
         if all_trades:
             trades_df = pd.DataFrame(all_trades).sort_values("日期", ascending=False)
@@ -408,6 +521,170 @@ if 'sim_results' in st.session_state and st.session_state['sim_results']:
         render_trades(results, "一般")
         render_details(results, "normal")
 
+    # --- Accuracy Dashboard ---
+    st.markdown("---")
+    st.subheader("🎯 預測準確度分析")
+    st.caption("驗證歷史預測是否正確：Buy 信號後價格是否上漲？Sell 信號後價格是否下跌？")
+
+    from src.model_monitoring import ModelDriftDetector
+    from supabase import create_client
+
+    try:
+        client = create_client(SUPABASE_URL, SUPABASE_KEY)
+        drift_detector = ModelDriftDetector(client)
+
+        accuracy_data = []
+        for code in STOCK_LIST:
+            for tf, tf_label in [("1d", "1天"), ("5d", "5天"), ("20d", "20天")]:
+                acc_result = drift_detector.calculate_accuracy(code, tf, days=60)
+                if acc_result.get('accuracy') is not None and acc_result.get('total', 0) > 0:
+                    accuracy_data.append({
+                        "股票代碼": code,
+                        "時間範圍": tf_label,
+                        "準確度": f"{acc_result['accuracy']:.1f}%",
+                        "正確/總數": f"{acc_result['correct']}/{acc_result['total']}",
+                        "Buy 準確度": f"{acc_result['buy_accuracy']:.1f}%" if acc_result.get('buy_accuracy') is not None else "-",
+                        "Sell 準確度": f"{acc_result['sell_accuracy']:.1f}%" if acc_result.get('sell_accuracy') is not None else "-",
+                        "Buy 信號數": acc_result.get('buy_signals', 0),
+                        "Sell 信號數": acc_result.get('sell_signals', 0),
+                    })
+
+        if accuracy_data:
+            acc_df = pd.DataFrame(accuracy_data)
+            st.dataframe(acc_df, use_container_width=True, hide_index=True)
+
+            # Accuracy chart
+            acc_chart_data = []
+            for row in accuracy_data:
+                acc_val = float(row["準確度"].replace("%", ""))
+                acc_chart_data.append({
+                    "股票": row["股票代碼"],
+                    "時間範圍": row["時間範圍"],
+                    "準確度": acc_val,
+                })
+            if acc_chart_data:
+                chart_df = pd.DataFrame(acc_chart_data)
+                fig_acc = px.bar(
+                    chart_df,
+                    x="股票",
+                    y="準確度",
+                    color="時間範圍",
+                    barmode="group",
+                    title="各股票各時間範圍預測準確度",
+                    labels={"準確度": "準確度 (%)", "股票": "股票代碼"},
+                )
+                fig_acc.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="隨機基準 50%")
+                fig_acc.update_layout(yaxis_range=[0, 100])
+                st.plotly_chart(fig_acc, use_container_width=True, key="accuracy_chart")
+        else:
+            st.info("尚無足夠的歷史預測數據進行準確度分析。")
+
+    except Exception as e:
+        st.warning(f"無法載入準確度分析: {e}")
+
+    # --- Portfolio Results ---
+    if 'sim_portfolio' in st.session_state and st.session_state['sim_portfolio']:
+        st.markdown("---")
+        st.subheader("📊 組合模擬結果")
+        portfolio = st.session_state['sim_portfolio']
+
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            color = "normal" if portfolio.total_return_pct >= 0 else "inverse"
+            st.metric("組合報酬", f"{portfolio.total_return_pct:+.1f}%", delta_color=color)
+        with p2:
+            st.metric("組合最終價值", f"HKD {portfolio.final_value:,.0f}")
+        with p3:
+            st.metric("組合 Sharpe", f"{portfolio.sharpe_ratio:.2f}")
+        with p4:
+            st.metric("組合最大回撤", f"{portfolio.max_drawdown_pct:.1f}%")
+
+        if portfolio.portfolio_history:
+            portfolio_df = pd.DataFrame([{
+                "日期": s.date,
+                "組合價值": s.portfolio_value,
+            } for s in portfolio.portfolio_history])
+            fig_port = px.line(
+                portfolio_df, x="日期", y="組合價值",
+                title="組合總價值走勢",
+                labels={"組合價值": "價值 (HKD)", "日期": "日期"},
+            )
+            fig_port.add_hline(
+                y=portfolio.initial_capital,
+                line_dash="dash", line_color="gray",
+                annotation_text=f"初始資金 HKD {portfolio.initial_capital:,.0f}",
+            )
+            fig_port.update_layout(yaxis_tickformat=",.0f")
+            st.plotly_chart(fig_port, use_container_width=True, key="portfolio_chart")
+
+    # --- Confidence Weighting Results ---
+    if 'sim_confidence' in st.session_state and st.session_state['sim_confidence']:
+        st.markdown("---")
+        st.subheader("🎯 信心度加權策略結果")
+        conf_res = st.session_state['sim_confidence']
+
+        st.markdown("##### 信心度加權 vs 固定倉位")
+        conf_rows = []
+        for code, cr in conf_res.items():
+            fixed = results.get(code)
+            conf_rows.append({
+                "股票代碼": code,
+                "固定倉位報酬": f"{fixed.total_return_pct:+.1f}%" if fixed else "-",
+                "信心度加權報酬": f"{cr.total_return_pct:+.1f}%",
+                "固定倉位勝率": f"{fixed.win_rate:.1f}%" if fixed else "-",
+                "信心度加權勝率": f"{cr.win_rate:.1f}%",
+                "固定倉位 Sharpe": f"{fixed.sharpe_ratio:.2f}" if fixed else "-",
+                "信心度加權 Sharpe": f"{cr.sharpe_ratio:.2f}",
+            })
+        st.dataframe(pd.DataFrame(conf_rows), use_container_width=True, hide_index=True)
+
+    # --- Monte Carlo Results ---
+    if 'sim_monte_carlo' in st.session_state and st.session_state['sim_monte_carlo']:
+        st.markdown("---")
+        st.subheader("🎲 蒙地卡羅測試結果")
+        mc_res = st.session_state['sim_monte_carlo']
+
+        for code, mc in mc_res.items():
+            with st.expander(f"📊 {code} 蒙地卡羅分析"):
+                st.markdown(f"**原始策略報酬:** {mc['original_return_pct']:+.1f}%")
+                st.markdown(f"**翻轉概率:** {mc['flip_probability']:.0%} (每次信號有 {mc['flip_probability']:.0%} 機率被隨機翻轉)")
+
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                with mc1:
+                    st.metric("平均報酬", f"{mc['mean_return_pct']:+.1f}%")
+                with mc2:
+                    st.metric("中位數報酬", f"{mc['median_return_pct']:+.1f}%")
+                with mc3:
+                    st.metric("獲利機率", f"{mc['prob_profit']:.1f}%")
+                with mc4:
+                    st.metric("標準差", f"{mc['std_return_pct']:.1f}%")
+
+                st.markdown("**報酬分佈:**")
+                p1, p2, p3, p4, p5 = st.columns(5)
+                with p1:
+                    st.metric("5th percentile", f"{mc['percentile_5']:+.1f}%")
+                with p2:
+                    st.metric("25th percentile", f"{mc['percentile_25']:+.1f}%")
+                with p3:
+                    st.metric("中位數", f"{mc['median_return_pct']:+.1f}%")
+                with p4:
+                    st.metric("75th percentile", f"{mc['percentile_75']:+.1f}%")
+                with p5:
+                    st.metric("95th percentile", f"{mc['percentile_95']:+.1f}%")
+
+                # Histogram of returns
+                if mc.get('returns_distribution'):
+                    hist_df = pd.DataFrame({"報酬率 (%)": mc['returns_distribution']})
+                    fig_hist = px.histogram(
+                        hist_df, x="報酬率 (%)", nbins=50,
+                        title=f"{code} 蒙地卡羅報酬分佈 ({mc['n_simulations']} 次模擬)",
+                        labels={"報酬率 (%)": "報酬率 (%)"},
+                    )
+                    fig_hist.add_vline(x=mc['original_return_pct'], line_dash="dash", line_color="red",
+                                       annotation_text="原始策略")
+                    fig_hist.add_vline(x=0, line_dash="dash", line_color="gray")
+                    st.plotly_chart(fig_hist, use_container_width=True, key=f"mc_hist_{code}")
+
 else:
     st.info("👈 設定參數後點擊「開始模擬」查看結果")
 
@@ -446,13 +723,28 @@ else:
         - **買入股數** = 可投資金額 ÷ (股價 × (1 + 佣金率))，取整數
         - **盈虧** = 賣出所得 - 買入成本 - 所有交易費用
         - **最大回撤** = 歷史最高點到最低點的跌幅百分比 (例：從 HKD 20,000 跌到 HKD 18,000 = 10%)
-        - **勝率** = 盈利交易次數 ÷ 總賣出次數 × 100%
+        - **勝率** = 盈利交易次數 ÷ 總交易次數 × 100% (包含賣出及持倉到期)
+        - **Sharpe Ratio** = 年化風險調整報酬率 (>1 不錯, >2 很好, <0 不如無風險投資)
+        - **Sortino Ratio** = 只考慮下跌風險的風險調整報酬率
+        - **利潤因子** = 總盈利 / 總虧損 (>1 表示盈利大於虧損)
+        - **平均持倉天數** = 每次買入到賣出的平均天數
+        - **買入持有** = 基準策略：在開始時買入並持有到結束
+
+        ### 進階功能
+
+        | 功能 | 說明 |
+        |------|------|
+        | **組合模擬** | 模擬所有選中股票的組合表現，資金平均分配 |
+        | **信心度加權** | 根據信號信心度調整倉位大小（高信心=大倉位，30%-100%） |
+        | **蒙地卡羅測試** | 隨機翻轉信號1000次，測試策略穩健性，顯示報酬分佈 |
+        | **預測準確度** | 驗證歷史預測是否正確：Buy後價格是否上漲？Sell後價格是否下跌？ |
 
         ### 注意事項
 
         - 本模擬僅供參考，不構成投資建議
         - 實際交易可能有滑點、流動性等影響
         - 不考慮做空（Sell 信號僅用於平倉）
+        - 蒙地卡羅測試使用隨機模擬，結果可能每次不同
         """)
 
 # --- Footer ---

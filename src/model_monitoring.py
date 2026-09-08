@@ -2,11 +2,16 @@
 Data quality checks, model drift detection, and backtesting engine.
 Run this module to validate data, detect model degradation, and backtest strategies.
 """
+import os
+import sys
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import logging
 import json
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.data_fetcher import fetch_stock_data
 
 logger = logging.getLogger(__name__)
 
@@ -103,10 +108,10 @@ class ModelDriftDetector:
         self.client = supabase_client
     
     def calculate_accuracy(self, stock_code: str, timeframe: str, days: int = 30) -> dict:
-        """Calculate prediction accuracy for a stock/timeframe."""
+        """Calculate prediction accuracy by verifying against actual price data."""
         try:
             start_date = (datetime.now() - timedelta(days=days)).date().isoformat()
-            
+
             # Get predictions
             pred_result = self.client.table('stock_predictions').select(
                 'signal', 'confidence', 'prediction_date'
@@ -115,22 +120,84 @@ class ModelDriftDetector:
             ).eq(
                 'timeframe', timeframe
             ).gte('prediction_date', start_date).execute()
-            
-            if not pred_result.data or len(pred_result.data) < 5:
+
+            if not pred_result.data or len(pred_result.data) < 3:
+                return {'accuracy': None, 'sample_size': 0, 'message': f'數據不足: 僅 {len(pred_result.data or [])} 筆預測'}
+
+            # Fetch actual price data
+            try:
+                price_df = fetch_stock_data(stock_code, years=1)
+                price_df['Date'] = pd.to_datetime(price_df['Date']).dt.date
+                price_lookup = dict(zip(price_df['Date'], price_df['Close']))
+                all_dates = sorted(price_lookup.keys())
+            except Exception as e:
+                logger.error(f"Failed to fetch price data for {stock_code}: {e}")
                 return {'accuracy': None, 'sample_size': 0}
-            
-            df = pd.DataFrame(pred_result.data)
-            
-            # Simple accuracy: count Buy signals that went up (need price data)
-            # For now, use confidence as proxy
-            avg_confidence = df['confidence'].mean()
-            signal_counts = df['signal'].value_counts().to_dict()
-            
+
+            tf_days = {'1d': 1, '5d': 5, '20d': 20}.get(timeframe, 1)
+            correct = 0
+            total = 0
+            buy_correct = 0
+            buy_total = 0
+            sell_correct = 0
+            sell_total = 0
+
+            for pred in pred_result.data:
+                pred_date_str = pred['prediction_date']
+                if isinstance(pred_date_str, str):
+                    pred_date = datetime.strptime(pred_date_str, '%Y-%m-%d').date()
+                else:
+                    pred_date = pred_date_str
+
+                signal = pred['signal']
+                if signal not in ('Buy', 'Sell'):
+                    continue
+
+                # Find pred_date index in price data
+                pred_idx = None
+                for i, d in enumerate(all_dates):
+                    if d >= pred_date:
+                        pred_idx = i
+                        break
+
+                if pred_idx is None or pred_idx + tf_days >= len(all_dates):
+                    continue
+
+                pred_close = price_lookup[all_dates[pred_idx]]
+                target_close = price_lookup[all_dates[pred_idx + tf_days]]
+
+                total += 1
+                is_correct = False
+                if signal == 'Buy' and target_close > pred_close:
+                    is_correct = True
+                elif signal == 'Sell' and target_close < pred_close:
+                    is_correct = True
+
+                if is_correct:
+                    correct += 1
+
+                if signal == 'Buy':
+                    buy_total += 1
+                    if is_correct:
+                        buy_correct += 1
+                elif signal == 'Sell':
+                    sell_total += 1
+                    if is_correct:
+                        sell_correct += 1
+
+            accuracy = (correct / total * 100) if total > 0 else 0
+            signal_counts = {p['signal'] for p in pred_result.data}
+
             return {
-                'accuracy': avg_confidence,
-                'sample_size': len(df),
+                'accuracy': accuracy,
+                'correct': correct,
+                'total': total,
+                'sample_size': len(pred_result.data),
                 'signal_distribution': signal_counts,
-                'avg_confidence': avg_confidence
+                'buy_accuracy': (buy_correct / buy_total * 100) if buy_total > 0 else None,
+                'sell_accuracy': (sell_correct / sell_total * 100) if sell_total > 0 else None,
+                'buy_signals': buy_total,
+                'sell_signals': sell_total,
             }
         except Exception as e:
             return {'accuracy': None, 'error': str(e)}
@@ -138,29 +205,29 @@ class ModelDriftDetector:
     def detect_drift(self, stock_code: str, timeframe: str) -> dict:
         """Detect if model performance is degrading."""
         try:
-            # Compare recent vs older predictions
-            recent = self.calculate_accuracy(stock_code, timeframe, days=7)
-            older = self.calculate_accuracy(stock_code, timeframe, days=30)
-            
-            if not recent['accuracy'] or not older['accuracy']:
-                return {'drift': False, 'message': '數據不足，無法檢測漂移'}
-            
-            # Calculate drift
+            recent = self.calculate_accuracy(stock_code, timeframe, days=14)
+            older = self.calculate_accuracy(stock_code, timeframe, days=60)
+
+            if recent.get('accuracy') is None or older.get('accuracy') is None:
+                msg_recent = recent.get('message', f"樣本={recent.get('sample_size', 0)}")
+                msg_older = older.get('message', f"樣本={older.get('sample_size', 0)}")
+                return {'drift': False, 'message': f'數據不足，無法檢測漂移 (近期: {msg_recent}, 長期: {msg_older})'}
+
             accuracy_change = recent['accuracy'] - older['accuracy']
-            
-            if accuracy_change < -0.1:  # 10% drop
+
+            if accuracy_change < -10:
                 return {
                     'drift': True,
                     'severity': 'high',
-                    'message': f'模型漂移警報: 準確度下降 {abs(accuracy_change):.1%}',
+                    'message': f'模型漂移警報: 準確度下降 {abs(accuracy_change):.1f}%',
                     'recent_accuracy': recent['accuracy'],
                     'older_accuracy': older['accuracy']
                 }
-            elif accuracy_change < -0.05:  # 5% drop
+            elif accuracy_change < -5:
                 return {
                     'drift': True,
                     'severity': 'medium',
-                    'message': f'可能出現漂移: 準確度變化 {accuracy_change:.1%}',
+                    'message': f'可能出現漂移: 準確度變化 {accuracy_change:.1f}%',
                     'recent_accuracy': recent['accuracy'],
                     'older_accuracy': older['accuracy']
                 }
@@ -189,50 +256,141 @@ class ModelDriftDetector:
 
 
 class Backtester:
-    """Backtest prediction strategies."""
-    
+    """Backtest prediction strategies against actual price data."""
+
     def __init__(self, supabase_client):
         self.client = supabase_client
-    
-    def backtest_strategy(self, stock_code: str, strategy: str = 'buy_and_hold') -> dict:
-        """Backtest a simple strategy."""
+
+    def backtest_strategy(self, stock_code: str, strategy: str = 'signal_follow') -> dict:
+        """
+        Backtest a strategy using actual predictions and price data.
+
+        Args:
+            stock_code: Stock code like '0700'
+            strategy: 'signal_follow' (buy on Buy, sell on Sell) or 'buy_and_hold'
+
+        Returns:
+            Dict with backtest results including returns, win rate, Sharpe ratio
+        """
         try:
             # Get historical predictions
             result = self.client.table('stock_predictions').select(
                 'signal', 'confidence', 'prediction_date', 'timeframe'
-            ).eq('stock_code', stock_code).order('prediction_date', desc=True).limit(100).execute()
-            
+            ).eq('stock_code', stock_code).order('prediction_date', desc=False).limit(200).execute()
+
             if not result.data or len(result.data) < 10:
                 return {'error': '數據不足，無法進行回測'}
-            
-            df = pd.DataFrame(result.data)
-            
-            # Simple backtest: count correct signals
-            total_predictions = len(df)
-            buy_signals = len(df[df['signal'] == 'Buy'])
-            sell_signals = len(df[df['signal'] == 'Sell'])
-            hold_signals = len(df[df['signal'] == 'Hold'])
-            
-            # Calculate basic metrics
-            avg_confidence = df['confidence'].mean()
-            
-            # Simplified win rate (would need price data for real calculation)
-            # For now, assume higher confidence = better
-            high_confidence = df[df['confidence'] > 0.6]
-            low_confidence = df[df['confidence'] < 0.4]
-            
+
+            # Fetch actual price data
+            try:
+                price_df = fetch_stock_data(stock_code, years=2)
+                price_df['Date'] = pd.to_datetime(price_df['Date']).dt.date
+                price_lookup = dict(zip(price_df['Date'], price_df['Close']))
+                all_dates = sorted(price_lookup.keys())
+            except Exception as e:
+                return {'error': f'無法獲取價格數據: {e}'}
+
+            # Use timeframe=1d for backtesting (most granular)
+            predictions = [p for p in result.data if p.get('timeframe') == '1d']
+            if not predictions:
+                predictions = result.data[:50]
+
+            # Simulate signal-following strategy
+            initial_capital = 20000.0
+            cash = initial_capital
+            shares = 0
+            buy_price = 0.0
+            trades = []
+            portfolio_values = []
+
+            for pred in predictions:
+                pred_date_str = pred['prediction_date']
+                if isinstance(pred_date_str, str):
+                    pred_date = datetime.strptime(pred_date_str, '%Y-%m-%d').date()
+                else:
+                    pred_date = pred_date_str
+
+                signal = pred['signal']
+                close_price = price_lookup.get(pred_date)
+                if close_price is None:
+                    prev_dates = [d for d in all_dates if d <= pred_date]
+                    if prev_dates:
+                        close_price = price_lookup[max(prev_dates)]
+                    else:
+                        continue
+
+                if signal == 'Buy' and shares == 0:
+                    shares = int(cash / close_price)
+                    if shares > 0:
+                        cost = shares * close_price
+                        cash -= cost
+                        buy_price = close_price
+                        trades.append({'date': pred_date, 'action': 'Buy', 'price': close_price, 'shares': shares})
+
+                elif signal == 'Sell' and shares > 0:
+                    sale_amount = shares * close_price
+                    pnl = sale_amount - (shares * buy_price)
+                    cash += sale_amount
+                    trades.append({'date': pred_date, 'action': 'Sell', 'price': close_price, 'shares': shares, 'pnl': pnl})
+                    shares = 0
+                    buy_price = 0.0
+
+                portfolio_values.append(cash + shares * close_price)
+
+            # Final value
+            final_price = price_lookup[all_dates[-1]] if all_dates else buy_price
+            final_value = cash + shares * final_price
+
+            # Calculate metrics
+            total_return = ((final_value - initial_capital) / initial_capital) * 100
+            sell_trades = [t for t in trades if t['action'] == 'Sell']
+            wins = sum(1 for t in sell_trades if t.get('pnl', 0) > 0)
+            win_rate = (wins / len(sell_trades) * 100) if sell_trades else 0
+
+            # Buy and hold benchmark
+            first_price = price_lookup[all_dates[0]] if all_dates else 0
+            bh_shares = int(initial_capital / first_price) if first_price > 0 else 0
+            bh_remaining = initial_capital - (bh_shares * first_price)
+            bh_final = bh_remaining + bh_shares * final_price
+            bh_return = ((bh_final - initial_capital) / initial_capital) * 100
+
+            # Daily returns for Sharpe
+            daily_returns = []
+            for i in range(1, len(portfolio_values)):
+                if portfolio_values[i-1] > 0:
+                    daily_returns.append((portfolio_values[i] - portfolio_values[i-1]) / portfolio_values[i-1])
+
+            sharpe = self.calculate_sharpe_ratio(daily_returns) if daily_returns else 0
+
+            # Max drawdown
+            peak = initial_capital
+            max_dd = 0
+            for v in portfolio_values:
+                if v > peak:
+                    peak = v
+                dd = (peak - v) / peak * 100 if peak > 0 else 0
+                if dd > max_dd:
+                    max_dd = dd
+
             return {
                 'stock_code': stock_code,
-                'total_predictions': total_predictions,
+                'strategy': strategy,
+                'total_predictions': len(predictions),
                 'signal_distribution': {
-                    'Buy': buy_signals,
-                    'Sell': sell_signals,
-                    'Hold': hold_signals
+                    'Buy': len([p for p in predictions if p['signal'] == 'Buy']),
+                    'Sell': len([p for p in predictions if p['signal'] == 'Sell']),
+                    'Hold': len([p for p in predictions if p['signal'] == 'Hold']),
                 },
-                'avg_confidence': avg_confidence,
-                'high_confidence_count': len(high_confidence),
-                'low_confidence_count': len(low_confidence),
-                'strategy': strategy
+                'initial_capital': initial_capital,
+                'final_value': round(final_value, 2),
+                'total_return_pct': round(total_return, 2),
+                'total_trades': len(trades),
+                'win_rate': round(win_rate, 1),
+                'max_drawdown_pct': round(max_dd, 2),
+                'sharpe_ratio': round(sharpe, 2),
+                'benchmark_return_pct': round(bh_return, 2),
+                'benchmark_final_value': round(bh_final, 2),
+                'alpha': round(total_return - bh_return, 2),
             }
         except Exception as e:
             return {'error': str(e)}
