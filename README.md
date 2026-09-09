@@ -213,6 +213,7 @@ project_root/
 - **演算法**: XGBoost + LightGBM + RandomForest + CatBoost 集成
 - **集成方式**: VotingClassifier (soft voting) 或 StackingClassifier (元模型 = LogisticRegression) 或 Blending (out-of-fold)
 - **超參數優化**: Optuna (50 trials，同時搜尋四個模型 + voting 權重)
+- **權重優化**: Optuna 自動搜尋最佳權重組合 (如 [0.3, 0.3, 0.2, 0.2])，非固定 1:1:1:1
 - **交叉驗證**: TimeSeriesSplit (n_splits=5)，嚴格遵守時序，不洩漏未來資訊
 - **類別不平衡處理**: SMOTE (僅在訓練折上套用，不跨越驗證折)
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
@@ -223,6 +224,7 @@ project_root/
 - **模型版本化**: 帶時間戳備份，自動保留最近 5 版
 - **特徵重要性**: 輸出至 `models/feature_importance_{timeframe}.csv`
 - **模型分歧檢測**: 當四個模型意見分歧 >= 50% 時強制 Hold
+- **特徵對齊**: 訓練時保存 `feature_columns`，預測時嚴格使用相同順序
 
 ### 技術指標 (33 Features)
 

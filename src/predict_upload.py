@@ -283,8 +283,8 @@ def predict_stock(stock_code: str, models: dict) -> list:
         features = model_data.get('feature_columns', FEATURE_COLUMNS)
         all_features.update(features)
 
-    # Use the last valid row
-    available_features = [c for c in sorted(all_features) if c in df.columns]
+    # Use the last valid row - preserve trained feature order per model
+    available_features = [c for c in all_features if c in df.columns]
     valid = df.dropna(subset=available_features)
     if valid.empty:
         raise ValueError(f"No valid feature data for {stock_code}")
