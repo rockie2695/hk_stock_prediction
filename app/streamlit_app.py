@@ -158,6 +158,15 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
             else:
                 delta_text = f"信心: {conf:.1%}"
 
+            # Add model disagreement indicator
+            if "model_disagreement" in row and pd.notna(row["model_disagreement"]):
+                disagreement = row["model_disagreement"]
+                model_split = row.get("model_split", "?/?")
+                if disagreement >= 0.5:
+                    delta_text += f" ⚠️ 分歧: {model_split}"
+                elif disagreement > 0:
+                    delta_text += f" | 分歧: {model_split}"
+
             st.metric(
                 label=f"{emoji} {row['stock_code']}",
                 value=signal,

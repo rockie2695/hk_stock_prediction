@@ -314,16 +314,51 @@ def predict_stock(stock_code: str, models: dict) -> list:
             logger.error(f"  Prediction error for {stock_code} {label}: {e}")
             continue
 
+        # Calculate model disagreement
+        # For ensemble models, check individual model predictions
+        model_disagreement = 0.0
+        model_split = "0/4"
+        
+        if hasattr(model, 'estimators_'):
+            # Ensemble model - get individual predictions
+            individual_predictions = []
+            for estimator in model.estimators_:
+                try:
+                    ind_proba = estimator.predict_proba(X)[0]
+                    ind_buy = ind_proba[1]
+                    individual_predictions.append(ind_buy)
+                except:
+                    continue
+            
+            if individual_predictions:
+                # Count how many predict Buy vs Sell
+                buy_count = sum(1 for p in individual_predictions if p > 0.5)
+                sell_count = len(individual_predictions) - buy_count
+                total_models = len(individual_predictions)
+                
+                # Disagreement = proportion of minority (0 = unanimous, 0.5 = 2v2 split)
+                minority_count = min(buy_count, sell_count)
+                model_disagreement = minority_count / total_models if total_models > 0 else 0
+                model_split = f"{buy_count}/{sell_count}"
+        
         # Use optimized thresholds from training (fallback to defaults)
         thresh_buy = model_data.get('threshold_buy', 0.55)
         thresh_sell = model_data.get('threshold_sell', 0.45)
 
+        # Determine signal
         if buy_prob > thresh_buy:
             signal = 'Buy'
         elif buy_prob < thresh_sell:
             signal = 'Sell'
         else:
             signal = 'Hold'
+        
+        # Force Hold if models disagree >= 50%
+        # This prevents weak signals when models are split
+        if model_disagreement >= 0.5 and signal != 'Hold':
+            original_signal = signal
+            signal = 'Hold'
+            logger.info(f"  ⚠️ {stock_code} {label}: Models split {model_split}, forcing Hold (was {original_signal})")
 
         prediction_date = get_prediction_date(days)
 
@@ -415,6 +450,8 @@ def predict_stock(stock_code: str, models: dict) -> list:
             'win_rate': win_rate,
             'threshold_buy': model_data.get('threshold_buy', 0.55),
             'threshold_sell': model_data.get('threshold_sell', 0.45),
+            'model_disagreement': round(model_disagreement, 2),
+            'model_split': model_split,
         })
 
     return results
@@ -473,6 +510,8 @@ def upload_to_supabase(records: list) -> tuple[int, int]:
                 'win_rate': record.get('win_rate', None),
                 'threshold_buy': record.get('threshold_buy', 0.55),
                 'threshold_sell': record.get('threshold_sell', 0.45),
+                'model_disagreement': record.get('model_disagreement', 0.0),
+                'model_split': record.get('model_split', '0/0'),
             }
 
             # Always insert new record (keep history)

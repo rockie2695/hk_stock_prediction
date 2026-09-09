@@ -22,6 +22,7 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45)
 - **模型版本化**: 帶時間戳的模型備份，自動保留最近 5 版，支持回滾
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
+- **模型分歧檢測**: 當模型意見分歧 >= 50% 時強制 Hold，顯示分歧程度
 - **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
 - **閾值互動控制**: 圖表可選擇時間範圍顯示 Buy/Sell 閾值線，避免多線重疊
 - **數據匯出**: 支援 CSV 和 Excel 格式匯出預測記錄
@@ -39,6 +40,7 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **預期報酬**: 基於信心度和波動率估算預期報酬率
 - **信心度追蹤**: 顯示信心度變化趨勢 (↑↓→)
 - **勝率統計**: 歷史預測準確率追蹤
+- **模型分歧檢測**: 當模型意見分歧時自動 Hold，避免弱勢決策
 
 ### 模型監控
 - **數據品質檢查**: 自動檢測缺失日期、信心度分佈異常
@@ -201,15 +203,16 @@ project_root/
 │       └── 1_💰_投資模擬器.py  # 投資模擬互動頁面
 ├── migrate_metrics.sql   # 資料庫遷移: 模型指標欄位
 ├── migrate_quick_wins.sql # 資料庫遷移: 風險管理欄位
-└── migrate_thresholds.sql # 資料庫遷移: Buy/Sell 閾值欄位
+├── migrate_thresholds.sql # 資料庫遷移: Buy/Sell 閾值欄位
+└── migrate_disagreement.sql # 資料庫遷移: 模型分歧指標
 ```
 
 ## 技術細節
 
 ### 機器學習模型
-- **演算法**: XGBoost + LightGBM + RandomForest 集成
-- **集成方式**: VotingClassifier (soft voting) 或 StackingClassifier (元模型 = LogisticRegression)
-- **超參數優化**: Optuna (50 trials，同時搜尋三個模型 + voting 權重)
+- **演算法**: XGBoost + LightGBM + RandomForest + CatBoost 集成
+- **集成方式**: VotingClassifier (soft voting) 或 StackingClassifier (元模型 = LogisticRegression) 或 Blending (out-of-fold)
+- **超參數優化**: Optuna (50 trials，同時搜尋四個模型 + voting 權重)
 - **交叉驗證**: TimeSeriesSplit (n_splits=5)，嚴格遵守時序，不洩漏未來資訊
 - **類別不平衡處理**: SMOTE (僅在訓練折上套用，不跨越驗證折)
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
@@ -219,6 +222,7 @@ project_root/
 - **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45)
 - **模型版本化**: 帶時間戳備份，自動保留最近 5 版
 - **特徵重要性**: 輸出至 `models/feature_importance_{timeframe}.csv`
+- **模型分歧檢測**: 當四個模型意見分歧 >= 50% 時強制 Hold
 
 ### 技術指標 (33 Features)
 
@@ -363,7 +367,7 @@ CREATE TABLE stock_predictions (
     signal TEXT CHECK (signal IN ('Buy', 'Sell', 'Hold')),
     confidence FLOAT8,
     model_version TEXT,
-    model_type TEXT,          -- 'voting', 'stacking', 'xgboost', 'lightgbm'
+    model_type TEXT,          -- 'voting', 'stacking', 'blending', 'xgboost', 'lightgbm', 'catboost'
     f1_score FLOAT8,          -- 模型 F1 分數
     auc_score FLOAT8,         -- 模型 AUC 分數
     expected_return FLOAT8,   -- 預期報酬率 (%)
@@ -374,6 +378,8 @@ CREATE TABLE stock_predictions (
     win_rate FLOAT8,          -- 歷史勝率 (%)
     threshold_buy FLOAT8,     -- 優化後的 Buy 閾值 (每個時間範圍不同)
     threshold_sell FLOAT8,    -- 優化後的 Sell 閾值 (每個時間範圍不同)
+    model_disagreement FLOAT8, -- 模型分歧度 (0=一致, 0.5=2v2, 1=完全分歧)
+    model_split TEXT,          -- 模型投票結果 (e.g., '4/0', '3/1', '2/2')
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
@@ -395,6 +401,10 @@ ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS stop_loss FLOAT8;
 ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS take_profit FLOAT8;
 ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS confidence_trend TEXT DEFAULT '-';
 ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS win_rate FLOAT8;
+
+-- 模型分歧指標
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS model_disagreement FLOAT8 DEFAULT 0;
+ALTER TABLE stock_predictions ADD COLUMN IF NOT EXISTS model_split TEXT DEFAULT '0/0';
 
 -- 移除唯一限制 (保留歷史記錄)
 ALTER TABLE stock_predictions DROP CONSTRAINT IF EXISTS unique_stock_prediction;
@@ -536,6 +546,16 @@ A: 系統會驗證歷史預測是否正確：Buy 信號 → N天後收盤價是�
 ### Q: 勝率和預測準確度有什麼差別？
 A: 勝率是指模擬交易中盈利的交易比例 (賣出或持倉到期時計算)。預測準確度是指信號方向是否正確 (價格是否朝預測方向移動)。兩者可能不同，因為勝率還受到交易成本、進出場時機等因素影響。
 
+### Q: 什麼是模型分歧 (Model Disagreement)？
+A: 模型分歧是指四個模型 (XGBoost, LightGBM, RandomForest, CatBoost) 預測結果不一致的程度。例如：
+- `4/0`：四個模型都認為 Buy → 分歧度 0 (完全一致)
+- `3/1`：三個 Buy，一個 Sell → 分歧度 0.25
+- `2/2`：兩個 Buy，兩個 Sell → 分歧度 0.5 (五五波)
+系統會在分歧度 >= 50% 時強制將信號設為 Hold，避免在模型意見分歧時做出弱勢決策。
+
+### Q: 模型分歧時為什麼要強制 Hold？
+A: 當模型意見分歧時 (如 2v2)，表示市場方向不明確。此時做出 Buy 或 Sell 決策風險較高。強制 Hold 可以避免在不確定時刻進場，保護資金安全。儀表板會顯示 ⚠️ 警告標示分歧程度。
+
 ### Q: 如何執行測試？
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。
 
@@ -557,14 +577,17 @@ A: 共 49 個測試，涵蓋：
 | **平行訓練** | 時間範圍 (1d, 5d, 20d) 平行訓練，速度提升 ~3x |
 | **平行預測** | 多支股票預測平行處理，大幅提升預測速度 |
 | **模型比較表** | 訓練時顯示各模型 F1 分數比較，清楚標示贏家 |
+| **模型分歧檢測** | 當模型意見分歧 >= 50% 時強制 Hold，顯示分歧程度 (如 2/2) |
 | **單元測試** | 新增 49 個測試，覆蓋設定、特徵工程、模型訓練、預測功能 |
 | **新增環境變數** | `USE_CATBOOST=True`, `USE_BLENDING=False` |
 
 ### 修改的檔案
 - `src/train_model.py` — CatBoost、Blending、平行訓練、模型比較表
-- `src/predict_upload.py` — 平行預測多支股票
+- `src/predict_upload.py` — 平行預測多支股票、模型分歧計算
 - `config.py` — 新增 USE_CATBOOST、USE_BLENDING 環境變數
 - `requirements.txt` — 新增 catboost>=1.2.0、pytest>=8.0.0
+- `app/streamlit_app.py` — 顯示模型分歧警告
+- `migrate_disagreement.sql` — 新增資料庫遷移腳本
 - `tests/` — 新增測試目錄與 4 個測試檔案
 
 ### 改進項目 (2026-09-08)
