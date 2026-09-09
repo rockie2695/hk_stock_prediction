@@ -35,6 +35,8 @@ STOCK_LIST = [code.strip() for code in STOCK_LIST_RAW.split(',') if code.strip()
 USE_ENSEMBLE = os.getenv("USE_ENSEMBLE", "True").lower() in ("true", "1", "t")
 USE_STACKING = os.getenv("USE_STACKING", "False").lower() in ("true", "1", "t")
 USE_SMOTE = os.getenv("USE_SMOTE", "True").lower() in ("true", "1", "t")
+USE_CATBOOST = os.getenv("USE_CATBOOST", "True").lower() in ("true", "1", "t")
+USE_BLENDING = os.getenv("USE_BLENDING", "False").lower() in ("true", "1", "t")
 
 # Validation
 _missing = []

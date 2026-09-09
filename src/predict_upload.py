@@ -1,7 +1,8 @@
 """
 Daily prediction and upload to Supabase.
 Loads 3 models (1d, 5d, 20d), predicts for all timeframes, upserts results.
-Supports ensemble models (Voting/Stacking) and single models.
+Supports ensemble models (Voting/Stacking/Blending) and single models.
+Includes parallel prediction for multiple stocks.
 """
 import os
 import sys
@@ -11,6 +12,7 @@ import pandas as pd
 from datetime import datetime, timedelta
 import pytz
 from supabase import create_client, Client
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY
@@ -418,6 +420,16 @@ def predict_stock(stock_code: str, models: dict) -> list:
     return results
 
 
+def _predict_stock_worker(args):
+    """Worker function for parallel prediction of a single stock."""
+    stock_code, models = args
+    try:
+        return predict_stock(stock_code, models)
+    except Exception as e:
+        logger.error(f"Prediction failed for {stock_code}: {e}")
+        return []
+
+
 def upload_to_supabase(records: list) -> tuple[int, int]:
     """
     Upload prediction records to Supabase via insert (keep history).
@@ -478,6 +490,7 @@ def upload_to_supabase(records: list) -> tuple[int, int]:
 def predict_and_upload() -> None:
     """
     Main pipeline: load all models, predict for all stocks and timeframes, upload to Supabase.
+    Supports parallel prediction for multiple stocks.
     
     Raises:
         SystemExit: If no models found or no predictions generated
@@ -489,14 +502,25 @@ def predict_and_upload() -> None:
         logger.error("No models found. Run train_model.py first.")
         sys.exit(1)
 
+    # Parallel prediction for multiple stocks
     all_records = []
-    for code in STOCK_LIST:
-        try:
-            records = predict_stock(code, models)
-            all_records.extend(records)
-        except Exception as e:
-            logger.error(f"Prediction failed for {code}: {e}")
-            continue
+    tasks = [(code, models) for code in STOCK_LIST]
+    
+    logger.info(f"Predicting {len(STOCK_LIST)} stocks in parallel...")
+    
+    with ProcessPoolExecutor(max_workers=min(len(STOCK_LIST), os.cpu_count() or 1)) as executor:
+        future_to_code = {
+            executor.submit(_predict_stock_worker, task): task[0] 
+            for task in tasks
+        }
+        
+        for future in as_completed(future_to_code):
+            code = future_to_code[future]
+            try:
+                records = future.result()
+                all_records.extend(records)
+            except Exception as e:
+                logger.error(f"Prediction failed for {code}: {e}")
 
     if not all_records:
         logger.error("No predictions generated.")

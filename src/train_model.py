@@ -1,14 +1,18 @@
 """
 Model training - Optuna hyperparameter tuning + Walk-Forward validation.
-Supports Voting/Stacking ensemble of XGBoost, LightGBM, RandomForest.
+Supports Voting/Stacking/Blending ensemble of XGBoost, LightGBM, RandomForest, CatBoost.
 Includes SMOTE for class imbalance and comprehensive metrics (F1, AUC, Precision, Recall).
 
 Priority rules:
   - USE_STACKING=True forces ensemble mode (overrides USE_ENSEMBLE=False)
-  - USE_ENSEMBLE=True + USE_STACKING=False → VotingClassifier
-  - USE_ENSEMBLE=True + USE_STACKING=True  → StackingClassifier
-  - USE_ENSEMBLE=False + USE_STACKING=False → single best model (XGBoost vs LightGBM)
+  - USE_BLENDING=True uses blending ensemble (stacking with out-of-fold predictions)
+  - USE_ENSEMBLE=True + USE_STACKING=False + USE_BLENDING=False → VotingClassifier
+  - USE_ENSEMBLE=False + USE_STACKING=False + USE_BLENDING=False → single best model
   - USE_SMOTE works with any of the above modes
+  
+Parallel training:
+  - Timeframes (1d, 5d, 20d) are trained in parallel using ProcessPoolExecutor
+  - Significantly faster on multi-core systems
 """
 import os
 import sys
@@ -26,9 +30,12 @@ from sklearn.ensemble import RandomForestClassifier
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import warnings
+warnings.filterwarnings('ignore')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE
+from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE, USE_CATBOOST, USE_BLENDING
 from src.data_fetcher import fetch_stock_data
 from src.feature_engineering import compute_features, compute_target_days, FEATURE_COLUMNS, filter_correlated_features
 from src.logger import setup_logger
@@ -40,6 +47,14 @@ MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')
 
 # Timeframes: label -> days ahead
 TIMEFRAMES = {'1d': 1, '5d': 5, '20d': 20}
+
+# Try importing CatBoost
+try:
+    import catboost as cb
+    HAS_CATBOOST = True
+except ImportError:
+    HAS_CATBOOST = False
+    logger.warning("CatBoost not installed. Install with: pip install catboost")
 
 
 def fetch_market_data(years: int = 3) -> pd.DataFrame:
@@ -248,6 +263,33 @@ def train_random_forest(X_train, y_train, trial=None):
     return model
 
 
+def train_catboost(X_train, y_train, trial=None):
+    """Train CatBoost with optional Optuna params."""
+    if not HAS_CATBOOST:
+        raise ImportError("CatBoost not installed")
+
+    if trial:
+        params = {
+            'iterations': trial.suggest_int('cb_iterations', 50, 500),
+            'depth': trial.suggest_int('cb_depth', 3, 10),
+            'learning_rate': trial.suggest_float('cb_learning_rate', 0.01, 0.3, log=True),
+            'l2_leaf_reg': trial.suggest_float('cb_l2_leaf_reg', 1e-8, 10.0, log=True),
+            'bagging_temperature': trial.suggest_float('cb_bagging_temperature', 0.0, 1.0),
+            'random_strength': trial.suggest_float('cb_random_strength', 1e-8, 10.0, log=True),
+        }
+    else:
+        params = {}
+
+    model = cb.CatBoostClassifier(
+        **params,
+        random_seed=42,
+        verbose=0,
+        auto_class_weights='Balanced'
+    )
+    model.fit(X_train, y_train)
+    return model
+
+
 def _save_roc_curve(y_true, y_proba, timeframe_label, model_name='ensemble'):
     """Save ROC curve plot."""
     try:
@@ -267,6 +309,14 @@ def _save_roc_curve(y_true, y_proba, timeframe_label, model_name='ensemble'):
         logger.info(f"  ROC curve saved: {roc_path}")
     except Exception as e:
         logger.warning(f"  Failed to save ROC curve: {e}")
+
+
+def _get_estimator_list(xgb_model, lgb_model, rf_model, cb_model=None):
+    """Build estimator list based on enabled models."""
+    estimators = [('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)]
+    if USE_CATBOOST and cb_model is not None:
+        estimators.append(('cb', cb_model))
+    return estimators
 
 
 def objective_ensemble(trial, X, y, tscv):
@@ -293,11 +343,7 @@ def objective_ensemble(trial, X, y, tscv):
         'max_depth': trial.suggest_int('rf_max_depth', 3, 20),
         'min_samples_split': trial.suggest_int('rf_min_samples_split', 2, 20),
     }
-    # Tune voting weights
-    w1 = trial.suggest_float('w_xgb', 0.1, 2.0)
-    w2 = trial.suggest_float('w_lgb', 0.1, 2.0)
-    w3 = trial.suggest_float('w_rf', 0.1, 2.0)
-
+    
     n0 = (y == 0).sum()
     n1 = (y == 1).sum()
     scale_pos_weight = min(n0 / n1, 3.0) if n1 > 0 else 1
@@ -305,9 +351,29 @@ def objective_ensemble(trial, X, y, tscv):
     xgb_model = xgb.XGBClassifier(**xgb_params, scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='logloss', verbosity=0)
     lgb_model = lgb.LGBMClassifier(**lgb_params, scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1)
     rf_model = RandomForestClassifier(**rf_params, random_state=42, n_jobs=-1)
+    
+    # Tune CatBoost if enabled
+    cb_model = None
+    if USE_CATBOOST and HAS_CATBOOST:
+        cb_params = {
+            'iterations': trial.suggest_int('cb_iterations', 50, 500),
+            'depth': trial.suggest_int('cb_depth', 3, 10),
+            'learning_rate': trial.suggest_float('cb_learning_rate', 0.01, 0.3, log=True),
+        }
+        cb_model = cb.CatBoostClassifier(**cb_params, random_seed=42, verbose=0, auto_class_weights='Balanced')
 
-    if USE_STACKING:
-        estimator_list = [('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)]
+    # Tune voting weights
+    w1 = trial.suggest_float('w_xgb', 0.1, 2.0)
+    w2 = trial.suggest_float('w_lgb', 0.1, 2.0)
+    w3 = trial.suggest_float('w_rf', 0.1, 2.0)
+    w4 = trial.suggest_float('w_cb', 0.1, 2.0) if USE_CATBOOST and HAS_CATBOOST else 1.0
+
+    estimator_list = _get_estimator_list(xgb_model, lgb_model, rf_model, cb_model)
+    
+    if USE_BLENDING:
+        # Blending: use out-of-fold predictions
+        ensemble = _create_blending_ensemble(estimator_list, tscv)
+    elif USE_STACKING:
         ensemble = StackingClassifier(
             estimators=estimator_list,
             final_estimator=LogisticRegression(random_state=42),
@@ -315,10 +381,13 @@ def objective_ensemble(trial, X, y, tscv):
             passthrough=False
         )
     else:
+        weights = [w1, w2, w3]
+        if USE_CATBOOST and HAS_CATBOOST:
+            weights.append(w4)
         ensemble = VotingClassifier(
-            estimators=[('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)],
+            estimators=estimator_list,
             voting='soft',
-            weights=[w1, w2, w3]
+            weights=weights
         )
 
     scores = []
@@ -334,14 +403,69 @@ def objective_ensemble(trial, X, y, tscv):
     return np.mean(scores)
 
 
+def _create_blending_ensemble(estimators, tscv):
+    """Create a blending ensemble using out-of-fold predictions."""
+    class BlendingClassifier:
+        def __init__(self, estimators, tscv):
+            self.estimators = estimators
+            self.tscv = tscv
+            self.meta_model = LogisticRegression(random_state=42)
+            self.fitted_estimators = []
+            
+        def fit(self, X, y):
+            # Generate out-of-fold predictions for meta-features
+            oof_predictions = np.zeros((len(X), len(self.estimators)))
+            
+            for fold_idx, (train_idx, val_idx) in enumerate(self.tscv.split(X)):
+                X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+                y_train = y.iloc[train_idx]
+                
+                for est_idx, (name, estimator) in enumerate(self.estimators):
+                    # Clone and fit estimator
+                    from sklearn.base import clone
+                    est_clone = clone(estimator)
+                    est_clone.fit(X_train, y_train)
+                    oof_predictions[val_idx, est_idx] = est_clone.predict_proba(X_val)[:, 1]
+            
+            # Train meta-model on OOF predictions
+            self.meta_model.fit(oof_predictions, y)
+            
+            # Fit all estimators on full data for final predictions
+            self.fitted_estimators = []
+            for name, estimator in self.estimators:
+                from sklearn.base import clone
+                est_clone = clone(estimator)
+                est_clone.fit(X, y)
+                self.fitted_estimators.append((name, est_clone))
+            
+            return self
+        
+        def predict(self, X):
+            meta_features = self._get_meta_features(X)
+            return self.meta_model.predict(meta_features)
+        
+        def predict_proba(self, X):
+            meta_features = self._get_meta_features(X)
+            return self.meta_model.predict_proba(meta_features)
+        
+        def _get_meta_features(self, X):
+            meta_features = np.zeros((len(X), len(self.fitted_estimators)))
+            for est_idx, (name, estimator) in enumerate(self.fitted_estimators):
+                meta_features[:, est_idx] = estimator.predict_proba(X)[:, 1]
+            return meta_features
+    
+    return BlendingClassifier(estimators, tscv)
+
+
 def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     """Train and save model for one timeframe."""
-    # Resolve training mode: USE_STACKING overrides USE_ENSEMBLE (Stacking is a type of ensemble)
-    use_ensemble = USE_ENSEMBLE or USE_STACKING
+    # Resolve training mode: USE_STACKING or USE_BLENDING overrides USE_ENSEMBLE
+    use_ensemble = USE_ENSEMBLE or USE_STACKING or USE_BLENDING
 
     logger.info(f"\n{'='*50}")
     logger.info(f"Training model for {timeframe_label} ({days}-day ahead)")
-    logger.info(f"Ensemble: {use_ensemble}, Stacking: {USE_STACKING}, SMOTE: {USE_SMOTE}")
+    logger.info(f"Ensemble: {use_ensemble}, Stacking: {USE_STACKING}, Blending: {USE_BLENDING}, SMOTE: {USE_SMOTE}")
+    logger.info(f"CatBoost: {USE_CATBOOST and HAS_CATBOOST}")
     logger.info(f"{'='*50}")
 
     data, available_features = prepare_data(stock_codes, days)
@@ -388,17 +512,33 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
         rf_model = RandomForestClassifier(
             n_estimators=best_p['rf_n_estimators'], max_depth=best_p['rf_max_depth'],
             min_samples_split=best_p['rf_min_samples_split'], random_state=42, n_jobs=-1)
+        
+        cb_model = None
+        if USE_CATBOOST and HAS_CATBOOST:
+            cb_model = cb.CatBoostClassifier(
+                iterations=best_p.get('cb_iterations', 100),
+                depth=best_p.get('cb_depth', 6),
+                learning_rate=best_p.get('cb_learning_rate', 0.1),
+                random_seed=42, verbose=0, auto_class_weights='Balanced')
 
-        if USE_STACKING:
+        estimator_list = _get_estimator_list(xgb_model, lgb_model, rf_model, cb_model)
+        
+        if USE_BLENDING:
+            ensemble = _create_blending_ensemble(estimator_list, tscv)
+            model_type = 'blending'
+        elif USE_STACKING:
             ensemble = StackingClassifier(
-                estimators=[('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)],
+                estimators=estimator_list,
                 final_estimator=LogisticRegression(random_state=42), cv=3, passthrough=False)
             model_type = 'stacking'
         else:
             w1, w2, w3 = best_p['w_xgb'], best_p['w_lgb'], best_p['w_rf']
+            weights = [w1, w2, w3]
+            if USE_CATBOOST and HAS_CATBOOST:
+                weights.append(best_p.get('w_cb', 1.0))
             ensemble = VotingClassifier(
-                estimators=[('xgb', xgb_model), ('lgb', lgb_model), ('rf', rf_model)],
-                voting='soft', weights=[w1, w2, w3])
+                estimators=estimator_list,
+                voting='soft', weights=weights)
             model_type = 'voting'
 
         ensemble.fit(X_train_sm, y_train_sm)
@@ -413,20 +553,42 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
         _save_roc_curve(y_val, proba, timeframe_label, model_type)
 
     else:
-        # Single model selection
-        logger.info("Training individual models...")
-
-        # Optuna for XGBoost
+        # Single model selection - train all and compare
+        logger.info("Training individual models for comparison...")
+        
+        results = {}
+        
+        # XGBoost
         logger.info("Optuna XGBoost (50 trials)...")
         study_xgb = optuna.create_study(direction='maximize')
         study_xgb.optimize(lambda trial: _objective_single(train_xgboost, trial, X, y, tscv), n_trials=50)
+        results['xgboost'] = study_xgb.best_value
         logger.info(f"  XGBoost best F1: {study_xgb.best_value:.4f}")
 
-        # Optuna for LightGBM
+        # LightGBM
         logger.info("Optuna LightGBM (50 trials)...")
         study_lgb = optuna.create_study(direction='maximize')
         study_lgb.optimize(lambda trial: _objective_single(train_lightgbm, trial, X, y, tscv), n_trials=50)
+        results['lightgbm'] = study_lgb.best_value
         logger.info(f"  LightGBM best F1: {study_lgb.best_value:.4f}")
+        
+        # CatBoost (if enabled)
+        if USE_CATBOOST and HAS_CATBOOST:
+            logger.info("Optuna CatBoost (50 trials)...")
+            study_cb = optuna.create_study(direction='maximize')
+            study_cb.optimize(lambda trial: _objective_single(train_catboost, trial, X, y, tscv), n_trials=50)
+            results['catboost'] = study_cb.best_value
+            logger.info(f"  CatBoost best F1: {study_cb.best_value:.4f}")
+
+        # Select winner
+        best_model_name = max(results, key=results.get)
+        logger.info(f"\n{'='*50}")
+        logger.info("MODEL COMPARISON")
+        logger.info(f"{'='*50}")
+        for name, f1 in sorted(results.items(), key=lambda x: x[1], reverse=True):
+            marker = " ← WINNER" if name == best_model_name else ""
+            logger.info(f"  {name:12s}: F1={f1:.4f}{marker}")
+        logger.info(f"{'='*50}")
 
         splits = list(tscv.split(X))
         train_idx, val_idx = splits[-1]
@@ -435,36 +597,32 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
 
         X_train_sm, y_train_sm = _apply_smote(X_train, y_train)
 
-        # XGBoost
-        best_xgb_params = {k.replace('xgb_', ''): v for k, v in study_xgb.best_params.items()}
-        xgb_model = train_xgboost(X_train_sm, y_train_sm, trial=None)
-        xgb_model.set_params(**best_xgb_params)
-        xgb_model.fit(X_train_sm, y_train_sm)
-        xgb_f1 = f1_score(y_val, xgb_model.predict(X_val), zero_division=0)
-        xgb_auc = roc_auc_score(y_val, xgb_model.predict_proba(X_val)[:, 1])
+        # Train winner
+        if best_model_name == 'xgboost':
+            best_xgb_params = {k.replace('xgb_', ''): v for k, v in study_xgb.best_params.items()}
+            best_model = train_xgboost(X_train_sm, y_train_sm, trial=None)
+            best_model.set_params(**best_xgb_params)
+            best_model.fit(X_train_sm, y_train_sm)
+        elif best_model_name == 'lightgbm':
+            best_lgb_params = {k.replace('lgb_', ''): v for k, v in study_lgb.best_params.items()}
+            best_model = train_lightgbm(X_train_sm, y_train_sm, trial=None)
+            best_model.set_params(**best_lgb_params)
+            best_model.fit(X_train_sm, y_train_sm)
+        elif best_model_name == 'catboost':
+            best_cb_params = {k.replace('cb_', ''): v for k, v in study_cb.best_params.items()}
+            best_model = train_catboost(X_train_sm, y_train_sm, trial=None)
+            best_model.set_params(**best_cb_params)
+            best_model.fit(X_train_sm, y_train_sm)
 
-        # LightGBM
-        best_lgb_params = {k.replace('lgb_', ''): v for k, v in study_lgb.best_params.items()}
-        lgb_model = train_lightgbm(X_train_sm, y_train_sm, trial=None)
-        lgb_model.set_params(**best_lgb_params)
-        lgb_model.fit(X_train_sm, y_train_sm)
-        lgb_f1 = f1_score(y_val, lgb_model.predict(X_val), zero_division=0)
-        lgb_auc = roc_auc_score(y_val, lgb_model.predict_proba(X_val)[:, 1])
+        preds = best_model.predict(X_val)
+        proba = best_model.predict_proba(X_val)[:, 1]
+        best_f1 = f1_score(y_val, preds, zero_division=0)
+        best_auc = roc_auc_score(y_val, proba)
+        precision = precision_score(y_val, preds, zero_division=0)
+        recall = recall_score(y_val, preds, zero_division=0)
+        model_type = best_model_name
 
-        if xgb_f1 >= lgb_f1:
-            best_model = xgb_model
-            best_type = 'xgboost'
-            best_f1, best_auc = xgb_f1, xgb_auc
-        else:
-            best_model = lgb_model
-            best_type = 'lightgbm'
-            best_f1, best_auc = lgb_f1, lgb_auc
-
-        model_type = best_type
-        precision = precision_score(y_val, best_model.predict(X_val), zero_division=0)
-        recall = recall_score(y_val, best_model.predict(X_val), zero_division=0)
-
-        _save_roc_curve(y_val, best_model.predict_proba(X_val)[:, 1], timeframe_label, model_type)
+        _save_roc_curve(y_val, proba, timeframe_label, model_type)
 
     logger.info(f"Winner: {model_type}")
     logger.info(f"  F1={best_f1:.4f}, AUC={best_auc:.4f}, Precision={precision:.4f}, Recall={recall:.4f}")
@@ -511,7 +669,7 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     # Model versioning: save timestamped version, keep last 5
     from datetime import datetime as dt
     import pytz
-    timestamp = dt.now(pytz.timezone('Asia/Hong_Kong')).strftime('%Y%m%d_%H%M%S')
+    timestamp = dt.now(pytz.timezone('Asia.Hong_Kong')).strftime('%Y%m%d_%H%M%S')
     versioned_path = os.path.join(MODELS_DIR, f'best_model_{timeframe_label}_{timestamp}.pkl')
     with open(versioned_path, 'wb') as f:
         pickle.dump(model_data, f)
@@ -571,7 +729,7 @@ def _objective_single(train_fn, trial, X, y, tscv):
     Optuna objective function for single model hyperparameter tuning.
     
     Args:
-        train_fn: Training function (train_xgboost or train_lightgbm)
+        train_fn: Training function (train_xgboost, train_lightgbm, or train_catboost)
         trial: Optuna trial object for suggesting hyperparameters
         X: Feature DataFrame
         y: Target Series
@@ -593,24 +751,58 @@ def _objective_single(train_fn, trial, X, y, tscv):
     return np.mean(scores)
 
 
+def _train_timeframe_worker(args):
+    """Worker function for parallel training of a single timeframe."""
+    stock_codes, label, days = args
+    try:
+        return train_single_timeframe(stock_codes, label, days)
+    except Exception as e:
+        logger.error(f"Training failed for {label}: {e}")
+        return None
+
+
 def train_all_models(stock_codes: list):
-    """Train models for all timeframes."""
+    """Train models for all timeframes in parallel."""
     os.makedirs(MODELS_DIR, exist_ok=True)
     logger.info("=== Multi-Timeframe Model Training ===")
-    resolved_ensemble = USE_ENSEMBLE or USE_STACKING
-    logger.info(f"Ensemble={resolved_ensemble} (raw={USE_ENSEMBLE}), Stacking={USE_STACKING}, SMOTE={USE_SMOTE}")
+    resolved_ensemble = USE_ENSEMBLE or USE_STACKING or USE_BLENDING
+    logger.info(f"Ensemble={resolved_ensemble} (raw={USE_ENSEMBLE}), Stacking={USE_STACKING}, Blending={USE_BLENDING}, SMOTE={USE_SMOTE}")
+    logger.info(f"CatBoost={USE_CATBOOST and HAS_CATBOOST}")
 
+    # Prepare tasks
+    tasks = [(stock_codes, label, days) for label, days in TIMEFRAMES.items()]
+    
+    # Parallel training
     results = {}
-    for label, days in TIMEFRAMES.items():
-        path, model_type, f1, auc = train_single_timeframe(stock_codes, label, days)
-        results[label] = {'path': path, 'type': model_type, 'f1': f1, 'auc': auc}
+    logger.info(f"\nTraining {len(tasks)} timeframes in parallel...")
+    
+    with ProcessPoolExecutor(max_workers=min(len(tasks), os.cpu_count() or 1)) as executor:
+        future_to_label = {
+            executor.submit(_train_timeframe_worker, task): task[1] 
+            for task in tasks
+        }
+        
+        for future in as_completed(future_to_label):
+            label = future_to_label[future]
+            try:
+                result = future.result()
+                if result:
+                    path, model_type, f1, auc = result
+                    results[label] = {'path': path, 'type': model_type, 'f1': f1, 'auc': auc}
+            except Exception as e:
+                logger.error(f"Training failed for {label}: {e}")
 
-    logger.info("\n" + "="*50)
+    # Summary
+    logger.info("\n" + "="*60)
     logger.info("TRAINING SUMMARY")
-    logger.info("="*50)
-    for label, r in results.items():
-        logger.info(f"  {label}: {r['type']} | F1={r['f1']:.4f} | AUC={r['auc']:.4f}")
-    logger.info("="*50)
+    logger.info("="*60)
+    logger.info(f"{'Timeframe':<12} {'Model Type':<12} {'F1 Score':<12} {'AUC Score':<12}")
+    logger.info("-"*60)
+    for label in ['1d', '5d', '20d']:
+        if label in results:
+            r = results[label]
+            logger.info(f"{label:<12} {r['type']:<12} {r['f1']:<12.4f} {r['auc']:<12.4f}")
+    logger.info("="*60)
 
 
 if __name__ == '__main__':

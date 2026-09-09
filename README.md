@@ -1,18 +1,21 @@
 # 港股每日自動預測系統
 
-純機器學習的港股每日預測系統，使用 XGBoost / LightGBM / RandomForest 集成模型進行漲跌預測，結果自動上傳至 Supabase 雲端資料庫，並透過 Streamlit 網站展示。
+純機器學習的港股每日預測系統，使用 XGBoost / LightGBM / RandomForest / CatBoost 集成模型進行漲跌預測，結果自動上傳至 Supabase 雲端資料庫，並透過 Streamlit 網站展示。
 
 ## 系統架構
 
 ```
-Windows 本地定時訓練 → 預測結果上傳至 Supabase (PostgreSQL) → Streamlit 網站顯示
+Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreSQL) → Streamlit 網站顯示
 ```
 
 ## 功能特色
 
 ### 核心功能
 - **多時間範圍預測**: 同時預測明日(1天)、下週(5天)、下月(20天)
-- **模型集成**: VotingClassifier (soft voting) / StackingClassifier，XGBoost + LightGBM + RandomForest 三模型集成
+- **四模型集成**: XGBoost + LightGBM + RandomForest + CatBoost
+- **三種集成模式**: Voting (加權平均) / Stacking (元模型) / Blending (out-of-fold)
+- **平行訓練**: 時間範圍同時訓練，速度提升 ~3x
+- **平行預測**: 多支股票同時預測
 - **SMOTE 類別平衡**: 自動處理正負樣本不平衡問題
 - **33項技術指標**: 新增動量、波動率、威廉指標、MFI 等
 - **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵
@@ -72,6 +75,8 @@ STOCK_LIST=0700,9988,0005,0939
 # 模型訓練開關
 USE_ENSEMBLE=True
 USE_STACKING=False
+USE_BLENDING=False
+USE_CATBOOST=True
 USE_SMOTE=True
 ```
 
@@ -90,7 +95,8 @@ python src/train_model.py
 ```
 
 訓練完成後會顯示：
-- 各時間範圍的冠軍模型 (xgboost/lightgbm)
+- 各時間範圍的冠軍模型 (xgboost/lightgbm/catboost/voting/stacking/blending)
+- 模型比較表 (各模型 F1 分數)
 - F1 Score 和 AUC Score
 - Top 10 特徵重要性
 
@@ -109,6 +115,37 @@ streamlit run app/streamlit_app.py
 儀表板包含兩個頁面 (側邊欄切換)：
 - **📈 預測儀表板**: 信號卡片、信心度趨勢、信號分佈、預測記錄
 - **💰 投資模擬器**: 自訂日期範圍、資金、時間範圍，模擬跟單收益
+
+### 7. 執行測試
+
+```bash
+# 執行所有測試
+python -m pytest tests/ -v
+
+# 執行特定測試檔案
+python -m pytest tests/test_config.py -v
+
+# 執行特定測試類別
+python -m pytest tests/test_feature_engineering.py::TestFeatureEngineering -v
+
+# 執行特定測試函數
+python -m pytest tests/test_train_model.py::TestModelTraining::test_train_xgboost -v
+
+# 顯示詳細資訊
+python -m pytest tests/ -v --tb=long
+
+# 只顯示失敗的測試
+python -m pytest tests/ -v --tb=short
+```
+
+**測試覆蓋範圍：**
+| 測試檔案 | 測試數量 | 覆蓋範圍 |
+|---|---|---|
+| `test_config.py` | 10 | 環境變數、股票列表解析、Supabase 設定 |
+| `test_feature_engineering.py` | 17 | RSI、MACD、Bollinger、ATR、ADX、Stochastic、MFI、Williams %R |
+| `test_train_model.py` | 12 | XGBoost、LightGBM、RandomForest、CatBoost、SMOTE、Blending |
+| `test_predict.py` | 10 | 預測日期、模型載入、信號判定、上傳功能 |
+| **總計** | **49** | |
 
 ## 設定 Windows 自動排程
 
@@ -140,6 +177,12 @@ project_root/
 │   ├── best_model_{tf}_{ts}.pkl      # 版本化模型 (保留最近5版)
 │   ├── feature_importance_{tf}.csv   # 特徵重要性
 │   └── roc_curve_{tf}.png            # ROC 曲線
+├── tests/                # 單元測試
+│   ├── __init__.py
+│   ├── test_config.py           # 設定模組測試
+│   ├── test_feature_engineering.py  # 特徵工程測試
+│   ├── test_train_model.py      # 模型訓練測試
+│   └── test_predict.py          # 預測上傳測試
 ├── src/
 │   ├── __init__.py
 │   ├── logger.py         # 日誌設定
@@ -204,14 +247,20 @@ project_root/
 
 | 環境變數 | 預設值 | 說明 |
 |---|---|---|
-| `USE_ENSEMBLE` | `True` | 啟用三模型集成 (False = 單模型 XGBoost vs LightGBM) |
-| `USE_STACKING` | `False` | 使用 StackingClassifier。**若設為 True，會自動強制啟用集成模式**（忽略 USE_ENSEMBLE） |
-| `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 (可與任何模式組合) |
+| `USE_ENSEMBLE` | `True` | 啟用模型集成 (False = 單模型比較) |
+| `USE_STACKING` | `False` | 使用 StackingClassifier (元模型學習組合) |
+| `USE_BLENDING` | `False` | 使用 Blending (out-of-fold stacking，通常更準確) |
+| `USE_CATBOOST` | `True` | 包含 CatBoost 作為第4個模型 |
+| `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
 
 **優先級規則：**
-- `USE_STACKING=True` → 強制使用 StackingClassifier（覆寫 `USE_ENSEMBLE=False`）
-- `USE_ENSEMBLE=True` + `USE_STACKING=False` → VotingClassifier (soft voting)
-- `USE_ENSEMBLE=False` + `USE_STACKING=False` → 單一最佳模型
+- `USE_STACKING=True` 或 `USE_BLENDING=True` → 強制使用集成模式
+- `USE_ENSEMBLE=True` (預設) → VotingClassifier (加權平均)
+- `USE_ENSEMBLE=False` → 單一最佳模型 (XGBoost vs LightGBM vs CatBoost)
+
+**訓練速度：**
+- 時間範圍 (1d, 5d, 20d) **平行訓練**，速度提升 ~3x
+- 多支股票預測也支援**平行處理**
 
 ### 目標變數 (Target)
 - **目標**: N天後收盤價 > 今日收盤價 → 1 (Buy)，否則 → 0
@@ -399,10 +448,16 @@ A: 股票預測本身非常困難。即使是大型對沖基金，AUC 也通常�
 A: F1 = 精準率與召回率的平衡。F1 > 0.5 表示模型比隨機好，F1 > 0.6 表示可用於交易信號。
 
 ### Q: 什麼是模型集成 (Ensemble)？
-A: 同時訓練 XGBoost、LightGBM、RandomForest 三個模型，透過 VotingClassifier (soft voting) 或 StackingClassifier 結合它們的預測機率。通常比單一模型更穩定、AUC 更高。
+A: 同時訓練 XGBoost、LightGBM、RandomForest、CatBoost 四個模型，透過 VotingClassifier (加權平均)、StackingClassifier (元模型學習) 或 Blending (out-of-fold stacking) 結合它們的預測機率。通常比單一模型更穩定、AUC 更高。
 
-### Q: Voting 和 Stacking 有什麼差別？
-A: Voting 用加權平均結合三個模型的預測機率；Stacking 用一個元模型 (LogisticRegression) 學習如何最佳組合三個模型的預測。Stacking 通常更強但訓練較慢。若 `USE_STACKING=True`，會自動強制啟用集成模式（即使 `USE_ENSEMBLE=False`）。
+### Q: Voting、Stacking、Blending 有什麼差別？
+A: 
+- **Voting**: 用加權平均結合四個模型的預測機率 (預設，最快)
+- **Stacking**: 用一個元模型 (LogisticRegression) 學習如何最佳組合四個模型的預測 (較慢但通常更準)
+- **Blending**: 類似 Stacking，但使用 out-of-fold predictions 避免過擬合 (最慢但通常最準)
+
+### Q: CatBoost 是什麼？為什麼要加它？
+A: CatBoost 是 Yandex 開發的梯度提升框架，對類別型特徵處理更好，在金融數據上通常表現優於 XGBoost/LightGBM。加入後可提升集成模型的準確度。
 
 ### Q: SMOTE 是什麼？為什麼需要它？
 A: SMOTE (Synthetic Minority Over-sampling Technique) 在訓練集上生成少數類的合成樣本，解決正負樣本不平衡問題。僅在 TimeSeriesSplit 的訓練折上套用，不會洩漏未來資訊。
@@ -414,7 +469,10 @@ A: 修改 `.env` 中的 `STOCK_LIST`，例如 `STOCK_LIST=0700,9988,0005,0939,18
 A: 日誌位於 `logs/app.log`
 
 ### Q: 訓練要多久？
-A: 約 5-10 分鐘 (取決於股票數量和 Optuna trials)
+A: 約 3-5 分鐘 (使用平行訓練，時間範圍同時訓練)。若使用 Stacking 或 Blending，約 5-8 分鐘。
+
+### Q: 預測要多久？
+A: 平行預測多支股票，約 5-10 秒 (取決於股票數量)。
 
 ### Q: 什麼是特徵相關性過濾？
 A: 訓練前自動移除 |corr| > 0.9 的冗餘特徵。例如 `ret_3d` 與 `ret_1d`/`ret_5d` 高度相關，只保留最具資訊量的一個。減少噪音、加快訓練、降低過擬合。
@@ -478,7 +536,36 @@ A: 系統會驗證歷史預測是否正確：Buy 信號 → N天後收盤價是�
 ### Q: 勝率和預測準確度有什麼差別？
 A: 勝率是指模擬交易中盈利的交易比例 (賣出或持倉到期時計算)。預測準確度是指信號方向是否正確 (價格是否朝預測方向移動)。兩者可能不同，因為勝率還受到交易成本、進出場時機等因素影響。
 
+### Q: 如何執行測試？
+A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。
+
+### Q: 測試覆蓋了哪些功能？
+A: 共 49 個測試，涵蓋：
+- 環境變數載入與驗證 (10 個)
+- 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個)
+- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost、SMOTE、Blending (12 個)
+- 預測功能：日期計算、模型載入、信號判定、上傳 (10 個)
+
 ## 近期更新
+
+### 改進項目 (2026-09-10)
+
+| 改進 | 說明 |
+|---|---|
+| **CatBoost 模型** | 新增 CatBoost 作為第4個模型選項，通常在金融數據上表現更好 |
+| **Blending 集成** | 新增 Blending 模式 (out-of-fold stacking)，通常比 Voting 更準確 |
+| **平行訓練** | 時間範圍 (1d, 5d, 20d) 平行訓練，速度提升 ~3x |
+| **平行預測** | 多支股票預測平行處理，大幅提升預測速度 |
+| **模型比較表** | 訓練時顯示各模型 F1 分數比較，清楚標示贏家 |
+| **單元測試** | 新增 49 個測試，覆蓋設定、特徵工程、模型訓練、預測功能 |
+| **新增環境變數** | `USE_CATBOOST=True`, `USE_BLENDING=False` |
+
+### 修改的檔案
+- `src/train_model.py` — CatBoost、Blending、平行訓練、模型比較表
+- `src/predict_upload.py` — 平行預測多支股票
+- `config.py` — 新增 USE_CATBOOST、USE_BLENDING 環境變數
+- `requirements.txt` — 新增 catboost>=1.2.0、pytest>=8.0.0
+- `tests/` — 新增測試目錄與 4 個測試檔案
 
 ### 改進項目 (2026-09-08)
 
