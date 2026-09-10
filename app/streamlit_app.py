@@ -74,11 +74,14 @@ def get_predictions(start_date_str, end_date_str):
 @st.cache_data(ttl=300)
 def get_stock_ohlcv(stock_code: str, days: int = 90):
     """Fetch OHLCV data for a stock, cached for 5 minutes."""
-    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-    from data_fetcher import fetch_stock_data
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.data_fetcher import fetch_stock_data
     try:
         df = fetch_stock_data(stock_code, years=1)
         if df is not None and len(df) > 0:
+            # Drop rows with NaN Close (e.g., today's data not yet available)
+            df = df.dropna(subset=["Close"])
             return df.tail(days)
     except Exception as e:
         st.warning(f"無法取得 {stock_code} 價格數據: {e}")
@@ -88,12 +91,18 @@ def get_stock_ohlcv(stock_code: str, days: int = 90):
 @st.cache_data(ttl=300)
 def get_latest_indicators(stock_code: str):
     """Compute latest technical indicators for a stock from OHLCV data."""
-    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-    from data_fetcher import fetch_stock_data
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.data_fetcher import fetch_stock_data
     from src.feature_engineering import compute_features
     try:
-        df = fetch_stock_data(stock_code, years=1)
-        if df is None or len(df) < 50:
+        # Need 2 years for reliable indicator calculation (MA50 needs 50+ days)
+        df = fetch_stock_data(stock_code, years=2)
+        if df is None or len(df) < 60:
+            return None
+        # Drop rows with NaN Close (e.g., today's data not yet available)
+        df = df.dropna(subset=["Close"])
+        if len(df) < 60:
             return None
         df = compute_features(df)
         latest = df.iloc[-1]
@@ -107,6 +116,7 @@ def get_latest_indicators(stock_code: str):
             "adx": latest.get("adx"),
             "bb_width": latest.get("bb_width"),
             "atr_14": latest.get("atr_14"),
+            "mfi": latest.get("mfi"),
             "vol_ratio_5d": latest.get("vol_ratio_5d"),
             "vol_ratio_10d": latest.get("vol_ratio_10d"),
             "close": latest.get("Close"),
@@ -114,6 +124,190 @@ def get_latest_indicators(stock_code: str):
         }
     except Exception:
         return None
+
+
+def get_indicator_alignment(indicators: dict, signal: str) -> list:
+    """Analyze how current indicators align with a Buy/Sell/Hold signal.
+    
+    Returns list of (indicator_name, status, description) tuples.
+    status: 'support', 'contradict', 'neutral'
+    """
+    if not indicators:
+        return []
+
+    results = []
+
+    # --- RSI ---
+    rsi = indicators.get("rsi_14")
+    if rsi is not None and pd.notna(rsi):
+        if signal == "Buy":
+            if rsi < 30:
+                results.append(("RSI", "support", f"RSI {rsi:.0f} 超賣，支持反彈上漲"))
+            elif rsi < 40:
+                results.append(("RSI", "support", f"RSI {rsi:.0f} 偏低，有利買入"))
+            elif rsi <= 60:
+                results.append(("RSI", "neutral", f"RSI {rsi:.0f} 中性"))
+            elif rsi < 70:
+                results.append(("RSI", "contradict", f"RSI {rsi:.0f} 偏高，買入需謹慎"))
+            else:
+                results.append(("RSI", "contradict", f"RSI {rsi:.0f} 超買，不建議追高"))
+        elif signal == "Sell":
+            if rsi > 70:
+                results.append(("RSI", "support", f"RSI {rsi:.0f} 超買，支持回調下跌"))
+            elif rsi > 60:
+                results.append(("RSI", "support", f"RSI {rsi:.0f} 偏高，有利賣出"))
+            elif rsi >= 40:
+                results.append(("RSI", "neutral", f"RSI {rsi:.0f} 中性"))
+            elif rsi > 30:
+                results.append(("RSI", "contradict", f"RSI {rsi:.0f} 偏低，賣出需謹慎"))
+            else:
+                results.append(("RSI", "contradict", f"RSI {rsi:.0f} 超賣，可能反彈"))
+        else:  # Hold
+            if rsi < 30:
+                results.append(("RSI", "support", f"RSI {rsi:.0f} 超賣，可能反彈"))
+            elif rsi > 70:
+                results.append(("RSI", "support", f"RSI {rsi:.0f} 超買，可能回調"))
+            else:
+                results.append(("RSI", "neutral", f"RSI {rsi:.0f} 中性，無明確方向"))
+
+    # --- MACD ---
+    macd_hist = indicators.get("macd_hist")
+    if macd_hist is not None and pd.notna(macd_hist):
+        if signal == "Buy":
+            if macd_hist > 0:
+                results.append(("MACD", "support", f"MACD 柱狀 {macd_hist:+.4f} 多頭動能"))
+            elif macd_hist > -0.01:
+                results.append(("MACD", "neutral", f"MACD 柱狀 {macd_hist:+.4f} 接近零軸"))
+            else:
+                results.append(("MACD", "contradict", f"MACD 柱狀 {macd_hist:+.4f} 空頭動能"))
+        elif signal == "Sell":
+            if macd_hist < 0:
+                results.append(("MACD", "support", f"MACD 柱狀 {macd_hist:+.4f} 空頭動能"))
+            elif macd_hist < 0.01:
+                results.append(("MACD", "neutral", f"MACD 柱狀 {macd_hist:+.4f} 接近零軸"))
+            else:
+                results.append(("MACD", "contradict", f"MACD 柱狀 {macd_hist:+.4f} 多頭動能"))
+        else:  # Hold
+            if abs(macd_hist) < 0.01:
+                results.append(("MACD", "neutral", f"MACD 柱狀 {macd_hist:+.4f} 接近零軸，方向不明"))
+            elif macd_hist > 0:
+                results.append(("MACD", "neutral", f"MACD 柱狀 {macd_hist:+.4f} 輕微多頭"))
+            else:
+                results.append(("MACD", "neutral", f"MACD 柱狀 {macd_hist:+.4f} 輕微空頭"))
+
+    # --- Stochastic ---
+    stoch_k = indicators.get("stoch_k")
+    if stoch_k is not None and pd.notna(stoch_k):
+        if signal == "Buy":
+            if stoch_k < 20:
+                results.append(("Stochastic", "support", f"K={stoch_k:.0f} 超賣，支持反彈"))
+            elif stoch_k < 40:
+                results.append(("Stochastic", "support", f"K={stoch_k:.0f} 偏低"))
+            elif stoch_k <= 80:
+                results.append(("Stochastic", "neutral", f"K={stoch_k:.0f} 中性"))
+            else:
+                results.append(("Stochastic", "contradict", f"K={stoch_k:.0f} 超買"))
+        elif signal == "Sell":
+            if stoch_k > 80:
+                results.append(("Stochastic", "support", f"K={stoch_k:.0f} 超買，支持回調"))
+            elif stoch_k > 60:
+                results.append(("Stochastic", "support", f"K={stoch_k:.0f} 偏高"))
+            elif stoch_k >= 20:
+                results.append(("Stochastic", "neutral", f"K={stoch_k:.0f} 中性"))
+            else:
+                results.append(("Stochastic", "contradict", f"K={stoch_k:.0f} 超賣"))
+        else:  # Hold
+            if stoch_k < 20:
+                results.append(("Stochastic", "support", f"K={stoch_k:.0f} 超賣，可能反彈"))
+            elif stoch_k > 80:
+                results.append(("Stochastic", "support", f"K={stoch_k:.0f} 超買，可能回調"))
+            else:
+                results.append(("Stochastic", "neutral", f"K={stoch_k:.0f} 中性"))
+
+    # --- MFI ---
+    mfi = indicators.get("mfi")
+    if mfi is not None and pd.notna(mfi):
+        if signal == "Buy":
+            if mfi < 20:
+                results.append(("MFI", "support", f"MFI {mfi:.0f} 資金枯竭，可能反彈"))
+            elif mfi < 40:
+                results.append(("MFI", "support", f"MFI {mfi:.0f} 資金偏弱"))
+            elif mfi <= 60:
+                results.append(("MFI", "neutral", f"MFI {mfi:.0f} 中性"))
+            else:
+                results.append(("MFI", "contradict", f"MFI {mfi:.0f} 資金偏強"))
+        elif signal == "Sell":
+            if mfi > 80:
+                results.append(("MFI", "support", f"MFI {mfi:.0f} 資金過熱，可能回調"))
+            elif mfi > 60:
+                results.append(("MFI", "support", f"MFI {mfi:.0f} 資金偏強"))
+            elif mfi >= 40:
+                results.append(("MFI", "neutral", f"MFI {mfi:.0f} 中性"))
+            else:
+                results.append(("MFI", "contradict", f"MFI {mfi:.0f} 資金偏弱"))
+        else:  # Hold
+            if mfi < 20:
+                results.append(("MFI", "support", f"MFI {mfi:.0f} 資金枯竭，可能反彈"))
+            elif mfi > 80:
+                results.append(("MFI", "support", f"MFI {mfi:.0f} 資金過熱，可能回調"))
+            else:
+                results.append(("MFI", "neutral", f"MFI {mfi:.0f} 中性"))
+
+    # --- ADX ---
+    adx = indicators.get("adx")
+    if adx is not None and pd.notna(adx):
+        if adx > 25:
+            # Strong trend - supports following the signal direction
+            if signal == "Hold":
+                results.append(("ADX", "contradict", f"ADX {adx:.0f} 趨勢明確，但信號為 Hold"))
+            else:
+                results.append(("ADX", "support", f"ADX {adx:.0f} 趨勢明確，支持跟隨方向"))
+        elif adx > 20:
+            results.append(("ADX", "neutral", f"ADX {adx:.0f} 趨勢不明確"))
+        else:
+            results.append(("ADX", "contradict", f"ADX {adx:.0f} 盤整，信號可靠性降低"))
+
+    # --- BB Width ---
+    bb_width = indicators.get("bb_width")
+    if bb_width is not None and pd.notna(bb_width):
+        if bb_width < 0.03:
+            results.append(("布林帶", "neutral", f"帶寬 {bb_width:.4f} 極窄，可能即將變盤"))
+        elif bb_width > 0.15:
+            results.append(("布林帶", "contradict", f"帶寬 {bb_width:.4f} 較大，波動性高"))
+        else:
+            results.append(("布林帶", "neutral", f"帶寬 {bb_width:.4f} 正常"))
+
+    # --- MA50 Deviation ---
+    ma50_dev = indicators.get("ma50_deviation")
+    if ma50_dev is not None and pd.notna(ma50_dev):
+        ma50_pct = ma50_dev * 100  # Convert decimal to percentage
+        if signal == "Buy":
+            if ma50_pct < -5:
+                results.append(("MA50", "support", f"偏離 {ma50_pct:+.1f}% 低於均線，可能回歸"))
+            elif ma50_pct < 0:
+                results.append(("MA50", "support", f"偏離 {ma50_pct:+.1f}% 在均線下方"))
+            elif ma50_pct < 5:
+                results.append(("MA50", "neutral", f"偏離 {ma50_pct:+.1f}% 接近均線"))
+            else:
+                results.append(("MA50", "contradict", f"偏離 {ma50_pct:+.1f}% 已高於均線"))
+        elif signal == "Sell":
+            if ma50_pct > 5:
+                results.append(("MA50", "support", f"偏離 {ma50_pct:+.1f}% 高於均線，可能回落"))
+            elif ma50_pct > 0:
+                results.append(("MA50", "support", f"偏離 {ma50_pct:+.1f}% 在均線上方"))
+            elif ma50_pct > -5:
+                results.append(("MA50", "neutral", f"偏離 {ma50_pct:+.1f}% 接近均線"))
+            else:
+                results.append(("MA50", "contradict", f"偏離 {ma50_pct:+.1f}% 已低於均線"))
+        else:  # Hold
+            if abs(ma50_pct) < 2:
+                results.append(("MA50", "neutral", f"偏離 {ma50_pct:+.1f}% 接近均線"))
+            elif ma50_pct < 0:
+                results.append(("MA50", "support", f"偏離 {ma50_pct:+.1f}% 在均線下方，可能回歸"))
+            else:
+                results.append(("MA50", "support", f"偏離 {ma50_pct:+.1f}% 在均線上方，可能回落"))
+
+    return results
 
 
 # --- Main Page ---
@@ -220,11 +414,59 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
                 delta_color=delta_color,
             )
 
+            # --- Indicator Alignment Analysis ---
+            stock_indicators = get_latest_indicators(row["stock_code"])
+            if stock_indicators:
+                alignment = get_indicator_alignment(stock_indicators, signal)
+                if alignment:
+                    supports = sum(1 for _, s, _ in alignment if s == "support")
+                    contradicts = sum(1 for _, s, _ in alignment if s == "contradict")
+                    neutrals = sum(1 for _, s, _ in alignment if s == "neutral")
+
+                    # Summary line
+                    parts = []
+                    if supports:
+                        parts.append(f"{supports} 項支持")
+                    if neutrals:
+                        parts.append(f"{neutrals} 項中性")
+                    if contradicts:
+                        parts.append(f"{contradicts} 項矛盾")
+                    summary = ", ".join(parts)
+
+                    if signal == "Hold":
+                        # For Hold: show why model chose Hold instead of Buy/Sell
+                        if contradicts > 0 and supports > 0:
+                            st.caption(f"⚠️ 指標分析: {summary} (多空分歧，模型選擇觀望)")
+                        elif contradicts > supports:
+                            st.caption(f"⚠️ 指標分析: {summary} (指標矛盾，建議觀望)")
+                        else:
+                            st.caption(f"➖ 指標分析: {summary} (無明確方向)")
+                    elif contradicts > supports:
+                        st.caption(f"⚠️ 指標分析: {summary}")
+                    elif supports > 0:
+                        st.caption(f"✅ 指標分析: {summary}")
+                    else:
+                        st.caption(f"➖ 指標分析: {summary}")
+
+                    # Per-indicator details (always show when alignment exists)
+                    for name, status, desc in alignment:
+                        if status == "support":
+                            icon = "✅"
+                        elif status == "contradict":
+                            icon = "❌"
+                        else:
+                            icon = "➖"
+                        st.caption(f"  {icon} {name} → {desc}")
+
     st.markdown("---")
 
 # --- Technical Indicators (Supporting Evidence) ---
 st.subheader("🔬 技術指標 (支持信號依據)")
-st.caption("模型學習的關鍵指標最新數值，作為信心度的佐證")
+st.caption(
+    "以下指標為模型訓練時輸入的 33 項特徵中的關鍵項目。"
+    "同一組指標同時用於預測 **1天 (1d)、5天 (5d)、20天 (20d)** 三個時間範圍的 Buy/Sell 信號。"
+    "信心度 = 模型根據這些指標學習到的模式所給出的機率。"
+)
 
 # Get all unique stock codes from current predictions
 indicator_stocks = sorted(df["stock_code"].unique())
@@ -244,7 +486,7 @@ if selected_indicator_stock:
 
         with col1:
             rsi = indicators.get("rsi_14")
-            if rsi is not None:
+            if rsi is not None and pd.notna(rsi):
                 rsi_color = "🟢" if 40 <= rsi <= 60 else ("🔴" if rsi > 70 or rsi < 30 else "🟡")
                 st.metric(
                     f"{rsi_color} RSI (14)",
@@ -252,12 +494,12 @@ if selected_indicator_stock:
                     help=">70 超買 | <30 超賣 | 40-60 中性",
                 )
             else:
-                st.metric("RSI (14)", "-")
+                st.metric("RSI (14)", "—", help="需至少 14 天收盤價數據。RSI = 100 - 100/(1+RS)，衡量價格動量。")
 
         with col2:
             stoch_k = indicators.get("stoch_k")
             stoch_d = indicators.get("stoch_d")
-            if stoch_k is not None and stoch_d is not None:
+            if stoch_k is not None and stoch_d is not None and pd.notna(stoch_k) and pd.notna(stoch_d):
                 stoch_color = "🟢" if 20 <= stoch_k <= 80 else ("🔴" if stoch_k > 80 or stoch_k < 20 else "🟡")
                 st.metric(
                     f"{stoch_color} Stochastic K/D",
@@ -265,11 +507,11 @@ if selected_indicator_stock:
                     help=">80 超買 | <20 超賣",
                 )
             else:
-                st.metric("Stochastic K/D", "-")
+                st.metric("Stochastic K/D", "—", help="需至少 17 天數據 (14天窗口+3天D線平滑)。計算最近14天內收盤價相對高低點的位置。")
 
         with col3:
             adx = indicators.get("adx")
-            if adx is not None:
+            if adx is not None and pd.notna(adx):
                 adx_label = "強趨勢" if adx > 25 else "弱趨勢/盤整"
                 adx_color = "🟢" if adx > 25 else "🟡"
                 st.metric(
@@ -279,11 +521,11 @@ if selected_indicator_stock:
                     help=">25 趨勢明確 | <20 盤整",
                 )
             else:
-                st.metric("ADX", "-")
+                st.metric("ADX", "—", help="需至少 28 天數據 (14天×2 次平滑)。衡量趨勢強度，不分方向。")
 
         with col4:
             mfi = indicators.get("mfi")
-            if mfi is not None:
+            if mfi is not None and pd.notna(mfi):
                 mfi_color = "🟢" if 40 <= mfi <= 60 else ("🔴" if mfi > 80 or mfi < 20 else "🟡")
                 st.metric(
                     f"{mfi_color} MFI",
@@ -291,7 +533,7 @@ if selected_indicator_stock:
                     help=">80 資金過熱 | <20 資金枯竭",
                 )
             else:
-                st.metric("MFI", "-")
+                st.metric("MFI", "—", help="需至少 14 天 OHLCV 數據。結合價格和成交量計算資金流入/流出。")
 
         # Row 2: Trend indicators
         st.markdown("**📊 趨勢指標**")
@@ -299,7 +541,7 @@ if selected_indicator_stock:
 
         with col5:
             macd_hist = indicators.get("macd_hist")
-            if macd_hist is not None:
+            if macd_hist is not None and pd.notna(macd_hist):
                 macd_signal = "📈 多頭" if macd_hist > 0 else "📉 空頭"
                 macd_color = "normal" if macd_hist > 0 else "inverse"
                 st.metric(
@@ -310,23 +552,23 @@ if selected_indicator_stock:
                     help="正=多頭動能 | 負=空頭動能",
                 )
             else:
-                st.metric("MACD 柱狀", "-")
+                st.metric("MACD 柱狀", "—", help="需至少 34 天數據 (EMA26+信號線9)。MACD = 12日EMA - 26日EMA。")
 
         with col6:
             bb_width = indicators.get("bb_width")
-            if bb_width is not None:
+            if bb_width is not None and pd.notna(bb_width):
                 st.metric(
                     "布林帶寬",
                     f"{bb_width:.4f}",
                     help="寬=波動大 | 窄=波動小（可能變盤）",
                 )
             else:
-                st.metric("布林帶寬", "-")
+                st.metric("布林帶寬", "—", help="需至少 20 天收盤價。布林帶寬 = (上軌-下軌)/中軌，衡量波動率。")
 
         with col7:
             atr = indicators.get("atr_14")
             close = indicators.get("close")
-            if atr is not None and close is not None:
+            if atr is not None and close is not None and pd.notna(atr) and pd.notna(close) and close > 0:
                 atr_pct = (atr / close) * 100
                 st.metric(
                     "ATR (14)",
@@ -335,22 +577,23 @@ if selected_indicator_stock:
                     help="平均真實波幅，衡量日內波動",
                 )
             else:
-                st.metric("ATR (14)", "-")
+                st.metric("ATR (14)", "—", help="需至少 14 天 OHLC 數據。ATR = 最近14天真實波幅的指數移動平均。")
 
         with col8:
             ma50_dev = indicators.get("ma50_deviation")
-            if ma50_dev is not None:
-                ma50_label = "偏離均線" if abs(ma50_dev) > 5 else "接近均線"
+            if ma50_dev is not None and pd.notna(ma50_dev):
+                ma50_pct = ma50_dev * 100  # Convert decimal to percentage
+                ma50_label = "偏離均線" if abs(ma50_pct) > 5 else "接近均線"
                 ma50_color = "normal" if ma50_dev > 0 else "inverse"
                 st.metric(
                     "MA50 偏離",
-                    f"{ma50_dev:+.2f}%",
+                    f"{ma50_pct:+.2f}%",
                     delta=ma50_label,
                     delta_color=ma50_color,
                     help="正=價格在均線上方 | 負=價格在均線下方",
                 )
             else:
-                st.metric("MA50 偏離", "-")
+                st.metric("MA50 偏離", "—", help="需至少 50 天收盤價。偏離率 = (現價-50日均線)/50日均線。")
 
         # Row 3: Volume indicators
         st.markdown("**📦 成交量指標**")
@@ -358,7 +601,7 @@ if selected_indicator_stock:
 
         with col9:
             vol_5d = indicators.get("vol_ratio_5d")
-            if vol_5d is not None:
+            if vol_5d is not None and pd.notna(vol_5d):
                 vol_label = "量能放大" if vol_5d > 1.2 else ("量能萎縮" if vol_5d < 0.8 else "量能正常")
                 vol_color = "normal" if vol_5d > 1.2 else ("inverse" if vol_5d < 0.8 else "off")
                 st.metric(
@@ -369,18 +612,18 @@ if selected_indicator_stock:
                     help=">1.2 放量 | <0.8 縮量",
                 )
             else:
-                st.metric("5日量比", "-")
+                st.metric("5日量比", "—", help="需至少 5 天成交量數據。量比 = 今日成交量 / 5日平均成交量。")
 
         with col10:
             vol_10d = indicators.get("vol_ratio_10d")
-            if vol_10d is not None:
+            if vol_10d is not None and pd.notna(vol_10d):
                 st.metric(
                     "10日量比",
                     f"{vol_10d:.2f}x",
                     help="10日平均成交量相對比率",
                 )
             else:
-                st.metric("10日量比", "-")
+                st.metric("10日量比", "—", help="需至少 10 天成交量數據。量比 = 今日成交量 / 10日平均成交量。")
 
         # Indicator interpretation
         with st.expander("📖 指標解讀說明"):
@@ -481,7 +724,7 @@ st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置")
 
 # Stock selector for K-line chart
 stock_codes_in_df = sorted(df["stock_code"].unique())
-col_stock, col_period = st.columns(2)
+col_stock, col_period, col_tf = st.columns(3)
 with col_stock:
     selected_kline_stock = st.selectbox(
         "選擇股票",
@@ -496,27 +739,41 @@ with col_period:
         format_func=lambda x: f"{x} 天",
         key="kline_period",
     )
+with col_tf:
+    kline_tf = st.selectbox(
+        "預測時間範圍",
+        options=["all", "1d", "5d", "20d"],
+        format_func=lambda x: "全部" if x == "all" else TIMEFRAME_LABELS.get(x, x),
+        key="kline_tf",
+    )
 
 if selected_kline_stock:
     ohlcv_df = get_stock_ohlcv(selected_kline_stock, days=kline_period)
 
     if not ohlcv_df.empty:
+        # Drop rows with NaN Close prices
+        ohlcv_df = ohlcv_df.dropna(subset=["Close"])
         # Get predictions for this stock within the OHLCV date range
-        min_date = ohlcv_df["Date"].min()
-        max_date = ohlcv_df["Date"].max()
+        min_date = ohlcv_df["Date"].min().date()
+        max_date = ohlcv_df["Date"].max().date()
         stock_preds = df[
             (df["stock_code"] == selected_kline_stock)
             & (df["prediction_date"] >= min_date)
             & (df["prediction_date"] <= max_date)
         ].copy()
 
+        # Filter by timeframe if selected
+        if kline_tf != "all":
+            stock_preds = stock_preds[stock_preds["timeframe"] == kline_tf]
+
         # Create candlestick chart
+        tf_label = "全部" if kline_tf == "all" else TIMEFRAME_LABELS.get(kline_tf, kline_tf)
         fig_kline = make_subplots(
             rows=2, cols=1,
             shared_xaxes=True,
             vertical_spacing=0.03,
             row_heights=[0.7, 0.3],
-            subplot_titles=(f"{selected_kline_stock} K線圖", "成交量"),
+            subplot_titles=(f"{selected_kline_stock} K線圖 — {tf_label} 預測", "成交量"),
         )
 
         # Candlestick
@@ -550,77 +807,93 @@ if selected_kline_stock:
             row=2, col=1,
         )
 
-        # Add Buy/Sell signal markers
+        # Add Buy/Sell signal markers (grouped by timeframe)
         if not stock_preds.empty and "signal" in stock_preds.columns:
-            buy_signals = stock_preds[stock_preds["signal"] == "Buy"]
-            sell_signals = stock_preds[stock_preds["signal"] == "Sell"]
+            # Marker config per timeframe: symbol, size
+            tf_markers = {
+                "1d": ("circle", 10),
+                "5d": ("square", 12),
+                "20d": ("diamond", 14),
+            }
+            tf_labels = {"1d": "明日", "5d": "下週", "20d": "下月"}
 
-            if not buy_signals.empty:
-                # Match prediction_date to OHLCV Date for positioning
-                buy_dates = pd.to_datetime(buy_signals["prediction_date"])
-                buy_close = []
-                for d in buy_dates:
-                    match = ohlcv_df[ohlcv_df["Date"] == d]
-                    if not match.empty:
-                        buy_close.append(match.iloc[0]["Low"] * 0.98)
-                    else:
-                        buy_close.append(None)
-                buy_signals = buy_signals.copy()
-                buy_signals["_plot_low"] = buy_close
-                buy_signals = buy_signals.dropna(subset=["_plot_low"])
+            for tf_key, (symbol, size) in tf_markers.items():
+                tf_label = tf_labels.get(tf_key, tf_key)
+                tf_preds = stock_preds[stock_preds["timeframe"] == tf_key]
+                if tf_preds.empty:
+                    continue
 
-                fig_kline.add_trace(
-                    go.Scatter(
-                        x=buy_signals["prediction_date"],
-                        y=buy_signals["_plot_low"],
-                        mode="markers",
-                        name="📈 Buy",
-                        marker=dict(
-                            symbol="triangle-up",
-                            size=14,
-                            color="#2ecc71",
-                            line=dict(width=2, color="darkgreen"),
-                        ),
-                        text=buy_signals.apply(
-                            lambda r: f"信心: {r['confidence']:.1%}", axis=1
-                        ),
-                        hovertemplate="Buy 信號<br>%{x}<br>%{text}<extra></extra>",
-                    ),
-                    row=1, col=1,
-                )
+                # Buy signals for this timeframe
+                buy_tf = tf_preds[tf_preds["signal"] == "Buy"]
+                if not buy_tf.empty:
+                    buy_dates = pd.to_datetime(buy_tf["prediction_date"])
+                    buy_y = []
+                    for d in buy_dates:
+                        match = ohlcv_df[ohlcv_df["Date"] == d]
+                        if not match.empty:
+                            buy_y.append(match.iloc[0]["Low"] * 0.98)
+                        else:
+                            buy_y.append(None)
+                    buy_tf = buy_tf.copy()
+                    buy_tf["_plot_y"] = buy_y
+                    buy_tf = buy_tf.dropna(subset=["_plot_y"])
 
-            if not sell_signals.empty:
-                sell_dates = pd.to_datetime(sell_signals["prediction_date"])
-                sell_close = []
-                for d in sell_dates:
-                    match = ohlcv_df[ohlcv_df["Date"] == d]
-                    if not match.empty:
-                        sell_close.append(match.iloc[0]["High"] * 1.02)
-                    else:
-                        sell_close.append(None)
-                sell_signals = sell_signals.copy()
-                sell_signals["_plot_high"] = sell_close
-                sell_signals = sell_signals.dropna(subset=["_plot_high"])
+                    if not buy_tf.empty:
+                        fig_kline.add_trace(
+                            go.Scatter(
+                                x=buy_tf["prediction_date"],
+                                y=buy_tf["_plot_y"],
+                                mode="markers",
+                                name=f"📈 Buy ({tf_label})",
+                                marker=dict(
+                                    symbol=symbol,
+                                    size=size,
+                                    color="#2ecc71",
+                                    line=dict(width=2, color="darkgreen"),
+                                ),
+                                text=buy_tf.apply(
+                                    lambda r: f"Buy {tf_label}<br>信心: {r['confidence']:.1%}", axis=1
+                                ),
+                                hovertemplate="%{text}<br>%{x}<extra></extra>",
+                            ),
+                            row=1, col=1,
+                        )
 
-                fig_kline.add_trace(
-                    go.Scatter(
-                        x=sell_signals["prediction_date"],
-                        y=sell_signals["_plot_high"],
-                        mode="markers",
-                        name="📉 Sell",
-                        marker=dict(
-                            symbol="triangle-down",
-                            size=14,
-                            color="#e74c3c",
-                            line=dict(width=2, color="darkred"),
-                        ),
-                        text=sell_signals.apply(
-                            lambda r: f"信心: {r['confidence']:.1%}", axis=1
-                        ),
-                        hovertemplate="Sell 信號<br>%{x}<br>%{text}<extra></extra>",
-                    ),
-                    row=1, col=1,
-                )
+                # Sell signals for this timeframe
+                sell_tf = tf_preds[tf_preds["signal"] == "Sell"]
+                if not sell_tf.empty:
+                    sell_dates = pd.to_datetime(sell_tf["prediction_date"])
+                    sell_y = []
+                    for d in sell_dates:
+                        match = ohlcv_df[ohlcv_df["Date"] == d]
+                        if not match.empty:
+                            sell_y.append(match.iloc[0]["High"] * 1.02)
+                        else:
+                            sell_y.append(None)
+                    sell_tf = sell_tf.copy()
+                    sell_tf["_plot_y"] = sell_y
+                    sell_tf = sell_tf.dropna(subset=["_plot_y"])
+
+                    if not sell_tf.empty:
+                        fig_kline.add_trace(
+                            go.Scatter(
+                                x=sell_tf["prediction_date"],
+                                y=sell_tf["_plot_y"],
+                                mode="markers",
+                                name=f"📉 Sell ({tf_label})",
+                                marker=dict(
+                                    symbol=symbol,
+                                    size=size,
+                                    color="#e74c3c",
+                                    line=dict(width=2, color="darkred"),
+                                ),
+                                text=sell_tf.apply(
+                                    lambda r: f"Sell {tf_label}<br>信心: {r['confidence']:.1%}", axis=1
+                                ),
+                                hovertemplate="%{text}<br>%{x}<extra></extra>",
+                            ),
+                            row=1, col=1,
+                        )
 
         fig_kline.update_layout(
             height=600,
@@ -637,15 +910,34 @@ if selected_kline_stock:
         # Summary stats
         latest_close = ohlcv_df.iloc[-1]["Close"]
         prev_close = ohlcv_df.iloc[-2]["Close"] if len(ohlcv_df) > 1 else latest_close
-        daily_change = (latest_close - prev_close) / prev_close
+
+        # Guard against NaN
+        if pd.isna(latest_close) or pd.isna(prev_close) or prev_close == 0:
+            daily_change = None
+        else:
+            daily_change = (latest_close - prev_close) / prev_close
 
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("最新收盤", f"HKD {latest_close:.2f}", f"{daily_change:+.2%}")
+            if pd.notna(latest_close):
+                delta_str = f"{daily_change:+.2%}" if daily_change is not None else ""
+                st.metric("最新收盤", f"HKD {latest_close:.2f}", delta_str)
+            else:
+                st.metric("最新收盤", "—", help="無法取得最新收盤價，可能是非交易日或數據缺失")
         with col2:
-            st.metric("最高價", f"HKD {ohlcv_df['High'].max():.2f}")
+            high_max = ohlcv_df["High"].max()
+            st.metric(
+                "最高價",
+                f"HKD {high_max:.2f}" if pd.notna(high_max) else "—",
+                help="所選時間範圍內的最高價" if pd.notna(high_max) else "數據不足，無法計算最高價",
+            )
         with col3:
-            st.metric("最低價", f"HKD {ohlcv_df['Low'].min():.2f}")
+            low_min = ohlcv_df["Low"].min()
+            st.metric(
+                "最低價",
+                f"HKD {low_min:.2f}" if pd.notna(low_min) else "—",
+                help="所選時間範圍內的最低價" if pd.notna(low_min) else "數據不足，無法計算最低價",
+            )
         with col4:
             buy_count = len(stock_preds[stock_preds["signal"] == "Buy"]) if not stock_preds.empty else 0
             sell_count = len(stock_preds[stock_preds["signal"] == "Sell"]) if not stock_preds.empty else 0
@@ -1105,14 +1397,14 @@ with st.expander("📈 滾動準確度 (Rolling Accuracy)", expanded=True):
 
         if accuracy_result.get("accuracy") is not None:
             acc = accuracy_result["accuracy"]
-            total = accuracy_result.get("total_predictions", 0)
-            correct = accuracy_result.get("correct_predictions", 0)
+            total = accuracy_result.get("total", 0)
+            correct = accuracy_result.get("correct", 0)
 
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric(
                     "30天滾動準確度",
-                    f"{acc:.1%}",
+                    f"{acc:.1f}%",
                     help="最近30天內正確預測的比例",
                 )
             with col2:
