@@ -35,7 +35,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE, USE_CATBOOST, USE_BLENDING
+from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE, USE_CATBOOST, USE_BLENDING, USE_GPU
 from src.data_fetcher import fetch_stock_data
 from src.feature_engineering import compute_features, compute_target_days, FEATURE_COLUMNS, filter_correlated_features
 from src.logger import setup_logger
@@ -270,24 +270,52 @@ def train_catboost(X_train, y_train, trial=None):
 
     if trial:
         params = {
-            'iterations': trial.suggest_int('cb_iterations', 50, 500),
-            'depth': trial.suggest_int('cb_depth', 3, 10),
-            'learning_rate': trial.suggest_float('cb_learning_rate', 0.01, 0.3, log=True),
+            'iterations': trial.suggest_int('cb_iterations', 100, 200),  # Reduced max
+            'depth': trial.suggest_int('cb_depth', 4, 6),  # Reduced from 4-8 to 4-6
+            'learning_rate': trial.suggest_float('cb_learning_rate', 0.05, 0.3, log=True),
             'l2_leaf_reg': trial.suggest_float('cb_l2_leaf_reg', 1e-8, 10.0, log=True),
-            'bagging_temperature': trial.suggest_float('cb_bagging_temperature', 0.0, 1.0),
-            'random_strength': trial.suggest_float('cb_random_strength', 1e-8, 10.0, log=True),
         }
     else:
-        params = {}
+        params = {
+            'iterations': 100,  # Conservative default
+            'depth': 6,  # Conservative default
+        }
+
+    # Detect GPU availability
+    task_type = _detect_gpu_task_type()
 
     model = cb.CatBoostClassifier(
         **params,
         random_seed=42,
-        verbose=0,
-        auto_class_weights='Balanced'
+        logging_level='Silent',
+        allow_writing_files=False,
+        auto_class_weights='Balanced',
+        task_type=task_type,
+        thread_count=4,  # Limit CPU threads to reduce RAM
+        border_count=128,  # Limit histogram bins
+        max_ctr_complexity=2,  # Reduce memory for categorical features
     )
     model.fit(X_train, y_train)
     return model
+
+
+def _detect_gpu_task_type() -> str:
+    """Detect if GPU is available for CatBoost training."""
+    if not USE_GPU:
+        logger.info("  GPU disabled (USE_GPU=False) - using CPU for CatBoost")
+        return 'CPU'
+    
+    try:
+        import subprocess
+        result = subprocess.run(['nvidia-smi'], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            logger.info("  GPU detected (NVIDIA) - using GPU for CatBoost")
+            return 'GPU'
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    
+    logger.info("  No GPU detected - using CPU for CatBoost")
+    return 'CPU'
 
 
 def _save_roc_curve(y_true, y_proba, timeframe_label, model_name='ensemble'):
@@ -356,11 +384,12 @@ def objective_ensemble(trial, X, y, tscv):
     cb_model = None
     if USE_CATBOOST and HAS_CATBOOST:
         cb_params = {
-            'iterations': trial.suggest_int('cb_iterations', 50, 500),
-            'depth': trial.suggest_int('cb_depth', 3, 10),
-            'learning_rate': trial.suggest_float('cb_learning_rate', 0.01, 0.3, log=True),
+            'iterations': trial.suggest_int('cb_iterations', 100, 200),  # Reduced max
+            'depth': trial.suggest_int('cb_depth', 4, 6),  # Reduced from 4-8 to 4-6
+            'learning_rate': trial.suggest_float('cb_learning_rate', 0.05, 0.3, log=True),
         }
-        cb_model = cb.CatBoostClassifier(**cb_params, random_seed=42, verbose=0, auto_class_weights='Balanced')
+        task_type = _detect_gpu_task_type()
+        cb_model = cb.CatBoostClassifier(**cb_params, random_seed=42, logging_level='Silent', allow_writing_files=False, auto_class_weights='Balanced', task_type=task_type, thread_count=4, border_count=128, max_ctr_complexity=2)
 
     # Tune voting weights
     w1 = trial.suggest_float('w_xgb', 0.1, 2.0)

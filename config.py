@@ -37,6 +37,7 @@ USE_STACKING = os.getenv("USE_STACKING", "False").lower() in ("true", "1", "t")
 USE_SMOTE = os.getenv("USE_SMOTE", "True").lower() in ("true", "1", "t")
 USE_CATBOOST = os.getenv("USE_CATBOOST", "True").lower() in ("true", "1", "t")
 USE_BLENDING = os.getenv("USE_BLENDING", "False").lower() in ("true", "1", "t")
+USE_GPU = os.getenv("USE_GPU", "False").lower() in ("true", "1", "t")  # GPU for CatBoost (uses more RAM)
 
 # Validation
 _missing = []

@@ -23,6 +23,7 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **模型版本化**: 帶時間戳的模型備份，自動保留最近 5 版，支持回滾
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
 - **模型分歧檢測**: 當模型意見分歧 >= 50% 時強制 Hold，顯示分歧程度
+- **GPU 支援**: CatBoost 可選擇使用 GPU 加速 (透過 `USE_GPU=True` 啟用)
 - **互動式儀表板**: Streamlit 顯示預測結果、信心度趨勢、信號分佈
 - **閾值互動控制**: 圖表可選擇時間範圍顯示 Buy/Sell 閾值線，避免多線重疊
 - **數據匯出**: 支援 CSV 和 Excel 格式匯出預測記錄
@@ -80,6 +81,7 @@ USE_STACKING=False
 USE_BLENDING=False
 USE_CATBOOST=True
 USE_SMOTE=True
+USE_GPU=False
 ```
 
 **⚠️ 重要：** 先在 [Supabase 官網](https://supabase.com) 取得專案 URL 與金鑰，填入 `.env` 後再執行。
@@ -225,6 +227,7 @@ project_root/
 - **特徵重要性**: 輸出至 `models/feature_importance_{timeframe}.csv`
 - **模型分歧檢測**: 當四個模型意見分歧 >= 50% 時強制 Hold
 - **特徵對齊**: 訓練時保存 `feature_columns`，預測時嚴格使用相同順序
+- **GPU 支援**: CatBoost 可選擇使用 GPU 加速 (透過 `USE_GPU=True` 啟用)
 
 ### 技術指標 (33 Features)
 
@@ -258,6 +261,7 @@ project_root/
 | `USE_BLENDING` | `False` | 使用 Blending (out-of-fold stacking，通常更準確) |
 | `USE_CATBOOST` | `True` | 包含 CatBoost 作為第4個模型 |
 | `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
+| `USE_GPU` | `False` | CatBoost 使用 GPU 訓練 (需要 NVIDIA GPU，會使用更多記憶體) |
 
 **優先級規則：**
 - `USE_STACKING=True` 或 `USE_BLENDING=True` → 強制使用集成模式
@@ -580,13 +584,18 @@ A: 共 49 個測試，涵蓋：
 | **平行預測** | 多支股票預測平行處理，大幅提升預測速度 |
 | **模型比較表** | 訓練時顯示各模型 F1 分數比較，清楚標示贏家 |
 | **模型分歧檢測** | 當模型意見分歧 >= 50% 時強制 Hold，顯示分歧程度 (如 2/2) |
+| **CatBoost 優化** | 降低記憶體使用 (depth 4-6, iterations 100-200, thread_count=4) |
+| **GPU 支援** | 新增 `USE_GPU` 環境變數，可選擇使用 GPU 加速 CatBoost 訓練 |
+| **每日批次檔** | 改進 `run_daily.bat` 顯示進度訊息，修復 Windows 相容性問題 |
 | **單元測試** | 新增 49 個測試，覆蓋設定、特徵工程、模型訓練、預測功能 |
-| **新增環境變數** | `USE_CATBOOST=True`, `USE_BLENDING=False` |
+| **新增環境變數** | `USE_CATBOOST=True`, `USE_BLENDING=False`, `USE_GPU=False` |
 
 ### 修改的檔案
-- `src/train_model.py` — CatBoost、Blending、平行訓練、模型比較表
-- `src/predict_upload.py` — 平行預測多支股票、模型分歧計算
-- `config.py` — 新增 USE_CATBOOST、USE_BLENDING 環境變數
+- `src/train_model.py` — CatBoost、Blending、平行訓練、模型比較表、GPU 偵測、記憶體優化
+- `src/predict_upload.py` — 平行預測多支股票、模型分歧計算、特徵對齊修正
+- `config.py` — 新增 USE_CATBOOST、USE_BLENDING、USE_GPU 環境變數
+- `run_daily.bat` — 改進進度顯示、修復 Windows 相容性
+- `.env.example` — 新增 USE_GPU 文件
 - `requirements.txt` — 新增 catboost>=1.2.0、pytest>=8.0.0
 - `app/streamlit_app.py` — 顯示模型分歧警告
 - `migrate_disagreement.sql` — 新增資料庫遷移腳本

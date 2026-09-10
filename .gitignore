@@ -14,3 +14,6 @@ venv/
 dist/
 build/
 .omo
+.devcontainer/
+.pytest_cache/
+catboost_info/
