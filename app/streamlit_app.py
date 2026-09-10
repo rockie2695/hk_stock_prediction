@@ -21,6 +21,7 @@ from supabase import create_client
 from dotenv import load_dotenv
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Load .env from project root
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -68,6 +69,51 @@ def get_predictions(start_date_str, end_date_str):
         return pd.DataFrame()
     except Exception:
         return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_stock_ohlcv(stock_code: str, days: int = 90):
+    """Fetch OHLCV data for a stock, cached for 5 minutes."""
+    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+    from data_fetcher import fetch_stock_data
+    try:
+        df = fetch_stock_data(stock_code, years=1)
+        if df is not None and len(df) > 0:
+            return df.tail(days)
+    except Exception as e:
+        st.warning(f"無法取得 {stock_code} 價格數據: {e}")
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=300)
+def get_latest_indicators(stock_code: str):
+    """Compute latest technical indicators for a stock from OHLCV data."""
+    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+    from data_fetcher import fetch_stock_data
+    from src.feature_engineering import compute_features
+    try:
+        df = fetch_stock_data(stock_code, years=1)
+        if df is None or len(df) < 50:
+            return None
+        df = compute_features(df)
+        latest = df.iloc[-1]
+        return {
+            "rsi_14": latest.get("rsi_14"),
+            "macd_diff": latest.get("macd_diff"),
+            "macd_dea": latest.get("macd_dea"),
+            "macd_hist": latest.get("macd_hist"),
+            "stoch_k": latest.get("stoch_k"),
+            "stoch_d": latest.get("stoch_d"),
+            "adx": latest.get("adx"),
+            "bb_width": latest.get("bb_width"),
+            "atr_14": latest.get("atr_14"),
+            "vol_ratio_5d": latest.get("vol_ratio_5d"),
+            "vol_ratio_10d": latest.get("vol_ratio_10d"),
+            "close": latest.get("Close"),
+            "ma50_deviation": latest.get("ma50_deviation"),
+        }
+    except Exception:
+        return None
 
 
 # --- Main Page ---
@@ -176,6 +222,184 @@ for tf_label, tf_title in TIMEFRAME_LABELS.items():
 
     st.markdown("---")
 
+# --- Technical Indicators (Supporting Evidence) ---
+st.subheader("🔬 技術指標 (支持信號依據)")
+st.caption("模型學習的關鍵指標最新數值，作為信心度的佐證")
+
+# Get all unique stock codes from current predictions
+indicator_stocks = sorted(df["stock_code"].unique())
+selected_indicator_stock = st.selectbox(
+    "選擇股票查看指標",
+    options=indicator_stocks,
+    key="indicator_stock",
+)
+
+if selected_indicator_stock:
+    indicators = get_latest_indicators(selected_indicator_stock)
+
+    if indicators:
+        # Row 1: Momentum indicators
+        st.markdown("**📈 動量指標**")
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            rsi = indicators.get("rsi_14")
+            if rsi is not None:
+                rsi_color = "🟢" if 40 <= rsi <= 60 else ("🔴" if rsi > 70 or rsi < 30 else "🟡")
+                st.metric(
+                    f"{rsi_color} RSI (14)",
+                    f"{rsi:.1f}",
+                    help=">70 超買 | <30 超賣 | 40-60 中性",
+                )
+            else:
+                st.metric("RSI (14)", "-")
+
+        with col2:
+            stoch_k = indicators.get("stoch_k")
+            stoch_d = indicators.get("stoch_d")
+            if stoch_k is not None and stoch_d is not None:
+                stoch_color = "🟢" if 20 <= stoch_k <= 80 else ("🔴" if stoch_k > 80 or stoch_k < 20 else "🟡")
+                st.metric(
+                    f"{stoch_color} Stochastic K/D",
+                    f"{stoch_k:.1f} / {stoch_d:.1f}",
+                    help=">80 超買 | <20 超賣",
+                )
+            else:
+                st.metric("Stochastic K/D", "-")
+
+        with col3:
+            adx = indicators.get("adx")
+            if adx is not None:
+                adx_label = "強趨勢" if adx > 25 else "弱趨勢/盤整"
+                adx_color = "🟢" if adx > 25 else "🟡"
+                st.metric(
+                    f"{adx_color} ADX",
+                    f"{adx:.1f}",
+                    delta=adx_label,
+                    help=">25 趨勢明確 | <20 盤整",
+                )
+            else:
+                st.metric("ADX", "-")
+
+        with col4:
+            mfi = indicators.get("mfi")
+            if mfi is not None:
+                mfi_color = "🟢" if 40 <= mfi <= 60 else ("🔴" if mfi > 80 or mfi < 20 else "🟡")
+                st.metric(
+                    f"{mfi_color} MFI",
+                    f"{mfi:.1f}",
+                    help=">80 資金過熱 | <20 資金枯竭",
+                )
+            else:
+                st.metric("MFI", "-")
+
+        # Row 2: Trend indicators
+        st.markdown("**📊 趨勢指標**")
+        col5, col6, col7, col8 = st.columns(4)
+
+        with col5:
+            macd_hist = indicators.get("macd_hist")
+            if macd_hist is not None:
+                macd_signal = "📈 多頭" if macd_hist > 0 else "📉 空頭"
+                macd_color = "normal" if macd_hist > 0 else "inverse"
+                st.metric(
+                    "MACD 柱狀",
+                    f"{macd_hist:+.4f}",
+                    delta=macd_signal,
+                    delta_color=macd_color,
+                    help="正=多頭動能 | 負=空頭動能",
+                )
+            else:
+                st.metric("MACD 柱狀", "-")
+
+        with col6:
+            bb_width = indicators.get("bb_width")
+            if bb_width is not None:
+                st.metric(
+                    "布林帶寬",
+                    f"{bb_width:.4f}",
+                    help="寬=波動大 | 窄=波動小（可能變盤）",
+                )
+            else:
+                st.metric("布林帶寬", "-")
+
+        with col7:
+            atr = indicators.get("atr_14")
+            close = indicators.get("close")
+            if atr is not None and close is not None:
+                atr_pct = (atr / close) * 100
+                st.metric(
+                    "ATR (14)",
+                    f"{atr:.2f}",
+                    delta=f"{atr_pct:.2f}% of price",
+                    help="平均真實波幅，衡量日內波動",
+                )
+            else:
+                st.metric("ATR (14)", "-")
+
+        with col8:
+            ma50_dev = indicators.get("ma50_deviation")
+            if ma50_dev is not None:
+                ma50_label = "偏離均線" if abs(ma50_dev) > 5 else "接近均線"
+                ma50_color = "normal" if ma50_dev > 0 else "inverse"
+                st.metric(
+                    "MA50 偏離",
+                    f"{ma50_dev:+.2f}%",
+                    delta=ma50_label,
+                    delta_color=ma50_color,
+                    help="正=價格在均線上方 | 負=價格在均線下方",
+                )
+            else:
+                st.metric("MA50 偏離", "-")
+
+        # Row 3: Volume indicators
+        st.markdown("**📦 成交量指標**")
+        col9, col10 = st.columns(2)
+
+        with col9:
+            vol_5d = indicators.get("vol_ratio_5d")
+            if vol_5d is not None:
+                vol_label = "量能放大" if vol_5d > 1.2 else ("量能萎縮" if vol_5d < 0.8 else "量能正常")
+                vol_color = "normal" if vol_5d > 1.2 else ("inverse" if vol_5d < 0.8 else "off")
+                st.metric(
+                    "5日量比",
+                    f"{vol_5d:.2f}x",
+                    delta=vol_label,
+                    delta_color=vol_color,
+                    help=">1.2 放量 | <0.8 縮量",
+                )
+            else:
+                st.metric("5日量比", "-")
+
+        with col10:
+            vol_10d = indicators.get("vol_ratio_10d")
+            if vol_10d is not None:
+                st.metric(
+                    "10日量比",
+                    f"{vol_10d:.2f}x",
+                    help="10日平均成交量相對比率",
+                )
+            else:
+                st.metric("10日量比", "-")
+
+        # Indicator interpretation
+        with st.expander("📖 指標解讀說明"):
+            st.markdown("""
+| 指標 | 正常範圍 | 超買/超賣 | 說明 |
+|---|---|---|---|
+| **RSI (14)** | 40-60 | >70 超買 / <30 超賣 | 相對強弱指標，衡量價格動量 |
+| **Stochastic K/D** | 20-80 | >80 超買 / <20 超賣 | 隨機震盪指標，判斷超買超賣 |
+| **ADX** | >25 為趨勢 | <20 盤整 | 趨勢強度（不分方向） |
+| **MFI** | 40-60 | >80 過熱 / <20 枯竭 | 資金流量指標，結合價格和成交量 |
+| **MACD 柱狀** | 正=多頭 | 負=空頭 | 多空動能指標 |
+| **布林帶寬** | 視情況 | 極窄=變盤 | 價格波動範圍 |
+| **ATR** | 視股價 | 高=波動大 | 平均真實波幅 |
+| **MA50 偏離** | ±5% 內 | >10% 偏離 | 與50日均線乖離率 |
+| **量比** | 0.8-1.2 | >1.5 放量 | 成交量相對強弱 |
+            """)
+    else:
+        st.info(f"無法載入 {selected_indicator_stock} 的指標數據。")
+
 # --- Confidence Trend (all timeframes) ---
 st.subheader("📊 預測信心度趨勢")
 
@@ -249,6 +473,185 @@ elif selected_th_tf != "不顯示":
 
 fig_trend.update_layout(yaxis_tickformat=".0%")
 st.plotly_chart(fig_trend, use_container_width=True)
+
+# --- K-Line Chart with Buy/Sell Signals ---
+st.markdown("---")
+st.subheader("🕯️ K線圖 (含買賣信號)")
+st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置")
+
+# Stock selector for K-line chart
+stock_codes_in_df = sorted(df["stock_code"].unique())
+col_stock, col_period = st.columns(2)
+with col_stock:
+    selected_kline_stock = st.selectbox(
+        "選擇股票",
+        options=stock_codes_in_df,
+        key="kline_stock",
+    )
+with col_period:
+    kline_period = st.selectbox(
+        "顯示天數",
+        options=[30, 60, 90, 180],
+        index=2,  # Default 90 days
+        format_func=lambda x: f"{x} 天",
+        key="kline_period",
+    )
+
+if selected_kline_stock:
+    ohlcv_df = get_stock_ohlcv(selected_kline_stock, days=kline_period)
+
+    if not ohlcv_df.empty:
+        # Get predictions for this stock within the OHLCV date range
+        min_date = ohlcv_df["Date"].min()
+        max_date = ohlcv_df["Date"].max()
+        stock_preds = df[
+            (df["stock_code"] == selected_kline_stock)
+            & (df["prediction_date"] >= min_date)
+            & (df["prediction_date"] <= max_date)
+        ].copy()
+
+        # Create candlestick chart
+        fig_kline = make_subplots(
+            rows=2, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.7, 0.3],
+            subplot_titles=(f"{selected_kline_stock} K線圖", "成交量"),
+        )
+
+        # Candlestick
+        fig_kline.add_trace(
+            go.Candlestick(
+                x=ohlcv_df["Date"],
+                open=ohlcv_df["Open"],
+                high=ohlcv_df["High"],
+                low=ohlcv_df["Low"],
+                close=ohlcv_df["Close"],
+                name="K線",
+                increasing_line_color="#26a69a",
+                decreasing_line_color="#ef5350",
+            ),
+            row=1, col=1,
+        )
+
+        # Volume bars
+        colors = [
+            "#26a69a" if c >= o else "#ef5350"
+            for c, o in zip(ohlcv_df["Close"], ohlcv_df["Open"])
+        ]
+        fig_kline.add_trace(
+            go.Bar(
+                x=ohlcv_df["Date"],
+                y=ohlcv_df["Volume"],
+                name="成交量",
+                marker_color=colors,
+                opacity=0.6,
+            ),
+            row=2, col=1,
+        )
+
+        # Add Buy/Sell signal markers
+        if not stock_preds.empty and "signal" in stock_preds.columns:
+            buy_signals = stock_preds[stock_preds["signal"] == "Buy"]
+            sell_signals = stock_preds[stock_preds["signal"] == "Sell"]
+
+            if not buy_signals.empty:
+                # Match prediction_date to OHLCV Date for positioning
+                buy_dates = pd.to_datetime(buy_signals["prediction_date"])
+                buy_close = []
+                for d in buy_dates:
+                    match = ohlcv_df[ohlcv_df["Date"] == d]
+                    if not match.empty:
+                        buy_close.append(match.iloc[0]["Low"] * 0.98)
+                    else:
+                        buy_close.append(None)
+                buy_signals = buy_signals.copy()
+                buy_signals["_plot_low"] = buy_close
+                buy_signals = buy_signals.dropna(subset=["_plot_low"])
+
+                fig_kline.add_trace(
+                    go.Scatter(
+                        x=buy_signals["prediction_date"],
+                        y=buy_signals["_plot_low"],
+                        mode="markers",
+                        name="📈 Buy",
+                        marker=dict(
+                            symbol="triangle-up",
+                            size=14,
+                            color="#2ecc71",
+                            line=dict(width=2, color="darkgreen"),
+                        ),
+                        text=buy_signals.apply(
+                            lambda r: f"信心: {r['confidence']:.1%}", axis=1
+                        ),
+                        hovertemplate="Buy 信號<br>%{x}<br>%{text}<extra></extra>",
+                    ),
+                    row=1, col=1,
+                )
+
+            if not sell_signals.empty:
+                sell_dates = pd.to_datetime(sell_signals["prediction_date"])
+                sell_close = []
+                for d in sell_dates:
+                    match = ohlcv_df[ohlcv_df["Date"] == d]
+                    if not match.empty:
+                        sell_close.append(match.iloc[0]["High"] * 1.02)
+                    else:
+                        sell_close.append(None)
+                sell_signals = sell_signals.copy()
+                sell_signals["_plot_high"] = sell_close
+                sell_signals = sell_signals.dropna(subset=["_plot_high"])
+
+                fig_kline.add_trace(
+                    go.Scatter(
+                        x=sell_signals["prediction_date"],
+                        y=sell_signals["_plot_high"],
+                        mode="markers",
+                        name="📉 Sell",
+                        marker=dict(
+                            symbol="triangle-down",
+                            size=14,
+                            color="#e74c3c",
+                            line=dict(width=2, color="darkred"),
+                        ),
+                        text=sell_signals.apply(
+                            lambda r: f"信心: {r['confidence']:.1%}", axis=1
+                        ),
+                        hovertemplate="Sell 信號<br>%{x}<br>%{text}<extra></extra>",
+                    ),
+                    row=1, col=1,
+                )
+
+        fig_kline.update_layout(
+            height=600,
+            xaxis_rangeslider_visible=False,
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        fig_kline.update_xaxes(title_text="", row=2, col=1)
+        fig_kline.update_yaxes(title_text="價格 (HKD)", row=1, col=1)
+        fig_kline.update_yaxes(title_text="成交量", row=2, col=1)
+
+        st.plotly_chart(fig_kline, use_container_width=True)
+
+        # Summary stats
+        latest_close = ohlcv_df.iloc[-1]["Close"]
+        prev_close = ohlcv_df.iloc[-2]["Close"] if len(ohlcv_df) > 1 else latest_close
+        daily_change = (latest_close - prev_close) / prev_close
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("最新收盤", f"HKD {latest_close:.2f}", f"{daily_change:+.2%}")
+        with col2:
+            st.metric("最高價", f"HKD {ohlcv_df['High'].max():.2f}")
+        with col3:
+            st.metric("最低價", f"HKD {ohlcv_df['Low'].min():.2f}")
+        with col4:
+            buy_count = len(stock_preds[stock_preds["signal"] == "Buy"]) if not stock_preds.empty else 0
+            sell_count = len(stock_preds[stock_preds["signal"] == "Sell"]) if not stock_preds.empty else 0
+            st.metric("信號統計", f"Buy: {buy_count} / Sell: {sell_count}")
+    else:
+        st.info(f"無法載入 {selected_kline_stock} 的價格數據，請稍後再試。")
 
 # --- Signal Distribution per Timeframe ---
 st.subheader("📋 信號分佈")
@@ -660,6 +1063,121 @@ with st.expander("🎯 信心度校準"):
             st.write(f"  - 數據量: {data['sample_size']} 筆預測")
     else:
         st.info("數據不足，無法進行信心度校準分析。")
+
+# --- Model Performance Tracking ---
+st.markdown("---")
+st.subheader("📊 模型表現追蹤")
+st.caption("追蹤模型預測的真實準確度，而非僅看訓練指標")
+
+# Rolling accuracy section
+with st.expander("📈 滾動準確度 (Rolling Accuracy)", expanded=True):
+    st.info("""
+    **計算方式：**
+    對每個預測，驗證 N 天後的實際價格是否朝預測方向移動：
+    - Buy 信號 → N天後收盤價 > 預測日收盤價 = 正確
+    - Sell 信號 → N天後收盤價 < 預測日收盤價 = 正確
+    - Hold 信號 → 不計入
+    
+    **滾動 30 天準確度** = 最近 30 天內正確預測數 / 總預測數 × 100%
+    """)
+
+    perf_stock = st.selectbox(
+        "選擇股票",
+        options=stock_codes_in_df,
+        key="perf_stock",
+    )
+    perf_tf = st.selectbox(
+        "選擇時間範圍",
+        options=["1d", "5d", "20d"],
+        format_func=lambda x: TIMEFRAME_LABELS[x],
+        key="perf_tf",
+    )
+
+    if perf_stock:
+        # Calculate rolling accuracy using ModelDriftDetector
+        from model_monitoring import ModelDriftDetector
+        drift_detector_perf = ModelDriftDetector(client)
+
+        # Get accuracy data
+        accuracy_result = drift_detector_perf.calculate_accuracy(
+            perf_stock, perf_tf, days=30
+        )
+
+        if accuracy_result.get("accuracy") is not None:
+            acc = accuracy_result["accuracy"]
+            total = accuracy_result.get("total_predictions", 0)
+            correct = accuracy_result.get("correct_predictions", 0)
+
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "30天滾動準確度",
+                    f"{acc:.1%}",
+                    help="最近30天內正確預測的比例",
+                )
+            with col2:
+                st.metric("正確預測數", f"{correct}")
+            with col3:
+                st.metric("總預測數", f"{total}")
+
+            # Show accuracy breakdown by signal type
+            if "details" in accuracy_result:
+                details = accuracy_result["details"]
+                if details:
+                    st.markdown("**各信號類型表現：**")
+                    detail_df = pd.DataFrame(details)
+                    if not detail_df.empty:
+                        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("數據不足，無法計算滾動準確度。需至少有已過期的預測記錄。")
+
+# Training metrics (static F1/AUC from DB)
+with st.expander("📋 訓練指標 (F1 / AUC)"):
+    st.info("""
+    **說明：** 以下指標為模型訓練時計算的 F1 Score 和 AUC Score。
+    這些是靜態指標，每次重新訓練後更新。
+    
+    - **F1 Score**: 精準率與召回率的調和平均數 (>0.5 可用, >0.6 良好)
+    - **AUC Score**: 模型區分漲跌的能力 (0.5=隨機, >0.6 可用, >0.7 良好)
+    """)
+
+    # Get latest training metrics from predictions
+    if not df.empty and "f1_score" in df.columns:
+        # Group by stock_code and timeframe, get latest metrics
+        metrics_data = []
+        for stock in stock_codes_in_df:
+            for tf in ["1d", "5d", "20d"]:
+                tf_label = TIMEFRAME_LABELS.get(tf, tf)
+                subset = df[
+                    (df["stock_code"] == stock)
+                    & (df["timeframe"] == tf)
+                    & (df["f1_score"].notna())
+                ]
+                if not subset.empty:
+                    latest = subset.sort_values("prediction_date").iloc[-1]
+                    metrics_data.append({
+                        "股票": stock,
+                        "時間範圍": tf_label,
+                        "F1 Score": latest.get("f1_score"),
+                        "AUC Score": latest.get("auc_score"),
+                        "冠軍模型": latest.get("model_type", "-"),
+                        "更新日期": latest.get("prediction_date", "-"),
+                    })
+
+        if metrics_data:
+            metrics_df = pd.DataFrame(metrics_data)
+            # Format scores
+            metrics_df["F1 Score"] = metrics_df["F1 Score"].apply(
+                lambda x: f"{x:.4f}" if pd.notna(x) else "-"
+            )
+            metrics_df["AUC Score"] = metrics_df["AUC Score"].apply(
+                lambda x: f"{x:.4f}" if pd.notna(x) else "-"
+            )
+            st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("尚無訓練指標數據。請先執行 `python src/train_model.py` 訓練模型。")
+    else:
+        st.info("尚無訓練指標數據。請先執行 `python src/train_model.py` 訓練模型。")
 
 # --- Footer ---
 st.markdown("---")
