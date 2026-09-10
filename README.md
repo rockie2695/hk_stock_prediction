@@ -147,9 +147,9 @@ python -m pytest tests/ -v --tb=short
 |---|---|---|
 | `test_config.py` | 10 | 環境變數、股票列表解析、Supabase 設定 |
 | `test_feature_engineering.py` | 17 | RSI、MACD、Bollinger、ATR、ADX、Stochastic、MFI、Williams %R |
-| `test_train_model.py` | 12 | XGBoost、LightGBM、RandomForest、CatBoost、SMOTE、Blending |
+| `test_train_model.py` | 14 | XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending |
 | `test_predict.py` | 10 | 預測日期、模型載入、信號判定、上傳功能 |
-| **總計** | **49** | |
+| **總計** | **51** | |
 
 ## 設定 Windows 自動排程
 
@@ -227,6 +227,7 @@ project_root/
 - **特徵重要性**: 輸出至 `models/feature_importance_{timeframe}.csv`
 - **模型分歧檢測**: 當四個模型意見分歧 >= 50% 時強制 Hold
 - **特徵對齊**: 訓練時保存 `feature_columns`，預測時嚴格使用相同順序
+- **CatBoost 早停**: CatBoost 使用 early_stopping_rounds=30，搭配 eval_set 驗證集，自動停止訓練避免過擬合 (iterations 200-300)
 - **GPU 支援**: CatBoost 可選擇使用 GPU 加速 (透過 `USE_GPU=True` 啟用)
 
 ### 技術指標 (33 Features)
@@ -566,10 +567,10 @@ A: 當模型意見分歧時 (如 2v2)，表示市場方向不明確。此時做�
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。
 
 ### Q: 測試覆蓋了哪些功能？
-A: 共 49 個測試，涵蓋：
+A: 共 51 個測試，涵蓋：
 - 環境變數載入與驗證 (10 個)
 - 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個)
-- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost、SMOTE、Blending (12 個)
+- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending (14 個)
 - 預測功能：日期計算、模型載入、信號判定、上傳 (10 個)
 
 ## 近期更新
@@ -584,10 +585,10 @@ A: 共 49 個測試，涵蓋：
 | **平行預測** | 多支股票預測平行處理，大幅提升預測速度 |
 | **模型比較表** | 訓練時顯示各模型 F1 分數比較，清楚標示贏家 |
 | **模型分歧檢測** | 當模型意見分歧 >= 50% 時強制 Hold，顯示分歧程度 (如 2/2) |
-| **CatBoost 優化** | 降低記憶體使用 (depth 4-6, iterations 100-200, thread_count=4) |
+| **CatBoost 優化** | 降低記憶體使用 (depth 4-6, iterations 200-300, early_stopping_rounds=30, thread_count=4) |
 | **GPU 支援** | 新增 `USE_GPU` 環境變數，可選擇使用 GPU 加速 CatBoost 訓練 |
 | **每日批次檔** | 改進 `run_daily.bat` 顯示進度訊息，修復 Windows 相容性問題 |
-| **單元測試** | 新增 49 個測試，覆蓋設定、特徵工程、模型訓練、預測功能 |
+| **單元測試** | 新增 51 個測試，覆蓋設定、特徵工程、模型訓練 (含 early stopping)、預測功能 |
 | **新增環境變數** | `USE_CATBOOST=True`, `USE_BLENDING=False`, `USE_GPU=False` |
 
 ### 修改的檔案

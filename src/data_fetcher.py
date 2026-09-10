@@ -109,7 +109,8 @@ def _fetch_yfinance(stock_code: str, start_date: datetime, end_date: datetime) -
     # HK stocks on Yahoo Finance use 4-digit codes: 0700.HK, 9988.HK, etc.
     ticker = f"{stock_code}.HK"
     data = yf.download(ticker, start=start_date.strftime('%Y-%m-%d'),
-                       end=end_date.strftime('%Y-%m-%d'), progress=False)
+                       end=end_date.strftime('%Y-%m-%d'), progress=False,
+                       auto_adjust=False)
 
     if data.empty:
         raise RuntimeError(f"No data returned from yfinance for {ticker}")

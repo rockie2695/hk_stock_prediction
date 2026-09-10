@@ -29,19 +29,19 @@ echo Started at %date% %time% >> logs\run_log.txt
 echo.
 echo [1/3] Training model (this may take 3-8 minutes)...
 echo [1/3] Training model... >> logs\run_log.txt
-python src\train_model.py >> logs\run_log.txt 2>&1
+python src\train_model.py
 
 :: Cleanup old records (keep 60 days)
 echo.
 echo [2/3] Cleaning up old records (60+ days)...
 echo [2/3] Cleaning up old records... >> logs\run_log.txt
-python src\cleanup_old.py >> logs\run_log.txt 2>&1
+python src\cleanup_old.py
 
 :: Predict and upload
 echo.
 echo [3/3] Predicting and uploading to Supabase...
 echo [3/3] Predicting... >> logs\run_log.txt
-python src\predict_upload.py >> logs\run_log.txt 2>&1
+python src\predict_upload.py
 
 :: Log finish time
 echo.

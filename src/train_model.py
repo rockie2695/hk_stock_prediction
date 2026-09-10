@@ -179,7 +179,7 @@ def _apply_smote(X_train, y_train):
         return X_train, y_train
 
 
-def train_xgboost(X_train, y_train, trial=None):
+def train_xgboost(X_train, y_train, trial=None, eval_set=None):
     """Train XGBoost with optional Optuna params."""
     n0 = (y_train == 0).sum()
     n1 = (y_train == 1).sum()
@@ -211,7 +211,7 @@ def train_xgboost(X_train, y_train, trial=None):
     return model
 
 
-def train_lightgbm(X_train, y_train, trial=None):
+def train_lightgbm(X_train, y_train, trial=None, eval_set=None):
     """Train LightGBM with optional Optuna params."""
     n0 = (y_train == 0).sum()
     n1 = (y_train == 1).sum()
@@ -241,7 +241,7 @@ def train_lightgbm(X_train, y_train, trial=None):
     return model
 
 
-def train_random_forest(X_train, y_train, trial=None):
+def train_random_forest(X_train, y_train, trial=None, eval_set=None):
     """Train RandomForest with optional Optuna params."""
     if trial:
         params = {
@@ -263,26 +263,33 @@ def train_random_forest(X_train, y_train, trial=None):
     return model
 
 
-def train_catboost(X_train, y_train, trial=None):
-    """Train CatBoost with optional Optuna params."""
+def train_catboost(X_train, y_train, trial=None, eval_set=None):
+    """Train CatBoost with optional Optuna params and early stopping."""
     if not HAS_CATBOOST:
         raise ImportError("CatBoost not installed")
 
     if trial:
         params = {
-            'iterations': trial.suggest_int('cb_iterations', 100, 200),  # Reduced max
-            'depth': trial.suggest_int('cb_depth', 4, 6),  # Reduced from 4-8 to 4-6
+            'iterations': trial.suggest_int('cb_iterations', 200, 300),
+            'depth': trial.suggest_int('cb_depth', 4, 6),
             'learning_rate': trial.suggest_float('cb_learning_rate', 0.05, 0.3, log=True),
             'l2_leaf_reg': trial.suggest_float('cb_l2_leaf_reg', 1e-8, 10.0, log=True),
         }
     else:
         params = {
-            'iterations': 100,  # Conservative default
-            'depth': 6,  # Conservative default
+            'iterations': 250,
+            'depth': 6,
         }
 
     # Detect GPU availability
     task_type = _detect_gpu_task_type()
+
+    # Early stopping: only when eval_set is provided
+    fit_params = {}
+    if eval_set is not None:
+        fit_params['eval_set'] = eval_set
+        fit_params['early_stopping_rounds'] = 30
+        fit_params['verbose'] = False
 
     model = cb.CatBoostClassifier(
         **params,
@@ -295,7 +302,7 @@ def train_catboost(X_train, y_train, trial=None):
         border_count=128,  # Limit histogram bins
         max_ctr_complexity=2,  # Reduce memory for categorical features
     )
-    model.fit(X_train, y_train)
+    model.fit(X_train, y_train, **fit_params)
     return model
 
 
@@ -384,8 +391,8 @@ def objective_ensemble(trial, X, y, tscv):
     cb_model = None
     if USE_CATBOOST and HAS_CATBOOST:
         cb_params = {
-            'iterations': trial.suggest_int('cb_iterations', 100, 200),  # Reduced max
-            'depth': trial.suggest_int('cb_depth', 4, 6),  # Reduced from 4-8 to 4-6
+            'iterations': trial.suggest_int('cb_iterations', 200, 300),
+            'depth': trial.suggest_int('cb_depth', 4, 6),
             'learning_rate': trial.suggest_float('cb_learning_rate', 0.05, 0.3, log=True),
         }
         task_type = _detect_gpu_task_type()
@@ -545,7 +552,7 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
         cb_model = None
         if USE_CATBOOST and HAS_CATBOOST:
             cb_model = cb.CatBoostClassifier(
-                iterations=best_p.get('cb_iterations', 100),
+                iterations=best_p.get('cb_iterations', 250),
                 depth=best_p.get('cb_depth', 6),
                 learning_rate=best_p.get('cb_learning_rate', 0.1),
                 random_seed=42, verbose=0, auto_class_weights='Balanced')
@@ -639,7 +646,7 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
             best_model.fit(X_train_sm, y_train_sm)
         elif best_model_name == 'catboost':
             best_cb_params = {k.replace('cb_', ''): v for k, v in study_cb.best_params.items()}
-            best_model = train_catboost(X_train_sm, y_train_sm, trial=None)
+            best_model = train_catboost(X_train_sm, y_train_sm, trial=None, eval_set=(X_val, y_val))
             best_model.set_params(**best_cb_params)
             best_model.fit(X_train_sm, y_train_sm)
 
@@ -698,7 +705,7 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     # Model versioning: save timestamped version, keep last 5
     from datetime import datetime as dt
     import pytz
-    timestamp = dt.now(pytz.timezone('Asia.Hong_Kong')).strftime('%Y%m%d_%H%M%S')
+    timestamp = dt.now(pytz.timezone('Asia/Hong_Kong')).strftime('%Y%m%d_%H%M%S')
     versioned_path = os.path.join(MODELS_DIR, f'best_model_{timeframe_label}_{timestamp}.pkl')
     with open(versioned_path, 'wb') as f:
         pickle.dump(model_data, f)
@@ -774,7 +781,7 @@ def _objective_single(train_fn, trial, X, y, tscv):
 
         X_train_sm, y_train_sm = _apply_smote(X_train, y_train)
 
-        model = train_fn(X_train_sm, y_train_sm, trial=trial)
+        model = train_fn(X_train_sm, y_train_sm, trial=trial, eval_set=(X_val, y_val))
         preds = model.predict(X_val)
         scores.append(f1_score(y_val, preds, zero_division=0))
     return np.mean(scores)

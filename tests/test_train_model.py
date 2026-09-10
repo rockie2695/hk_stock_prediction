@@ -77,6 +77,19 @@ class TestModelTraining:
         assert proba.shape == (10, 2)
         assert np.abs(proba.sum(axis=1) - 1).max() < 1e-6
     
+    def test_train_xgboost_with_eval_set(self, sample_training_data):
+        """Test XGBoost accepts eval_set param (ignored, for interface compat)."""
+        import src.train_model as tm
+        X, y = sample_training_data
+        split_idx = int(len(X) * 0.8)
+        X_train, X_eval = X.iloc[:split_idx], X.iloc[split_idx:]
+        y_train, y_eval = y.iloc[:split_idx], y.iloc[split_idx:]
+        
+        model = tm.train_xgboost(X_train, y_train, eval_set=(X_eval, y_eval))
+        assert model is not None
+        preds = model.predict(X_eval[:10])
+        assert len(preds) == 10
+    
     def test_train_lightgbm(self, sample_training_data):
         """Test LightGBM training."""
         import src.train_model as tm
@@ -106,7 +119,7 @@ class TestModelTraining:
         assert set(preds).issubset({0, 1})
     
     def test_train_catboost(self, sample_training_data):
-        """Test CatBoost training."""
+        """Test CatBoost training without eval_set (no early stopping)."""
         import src.train_model as tm
         if not tm.HAS_CATBOOST:
             pytest.skip("CatBoost not installed")
@@ -119,6 +132,28 @@ class TestModelTraining:
         
         # Test prediction
         preds = model.predict(X[:10])
+        assert len(preds) == 10
+        assert set(preds).issubset({0, 1})
+    
+    def test_train_catboost_with_eval_set(self, sample_training_data):
+        """Test CatBoost training with eval_set for early stopping."""
+        import src.train_model as tm
+        if not tm.HAS_CATBOOST:
+            pytest.skip("CatBoost not installed")
+        
+        X, y = sample_training_data
+        # Split into train/eval (80/20)
+        split_idx = int(len(X) * 0.8)
+        X_train, X_eval = X.iloc[:split_idx], X.iloc[split_idx:]
+        y_train, y_eval = y.iloc[:split_idx], y.iloc[split_idx:]
+        
+        model = tm.train_catboost(X_train, y_train, eval_set=(X_eval, y_eval))
+        assert model is not None
+        assert hasattr(model, 'predict')
+        assert hasattr(model, 'predict_proba')
+        
+        # Test prediction
+        preds = model.predict(X_eval[:10])
         assert len(preds) == 10
         assert set(preds).issubset({0, 1})
     
