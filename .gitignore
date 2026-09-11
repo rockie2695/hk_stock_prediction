@@ -1,5 +1,6 @@
 .env
 logs/
+cache/
 *.pkl
 models/*.pkl
 models/*.png

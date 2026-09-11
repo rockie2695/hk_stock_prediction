@@ -79,6 +79,24 @@ optimize_timing = st.sidebar.checkbox(
     key="sim_optimize",
 )
 
+slippage_pct = st.sidebar.slider(
+    "📊 滑點 (Slippage)",
+    min_value=0.0,
+    max_value=0.01,
+    value=0.001,
+    step=0.0005,
+    format="%.3f",
+    help="模擬實際交易滑點。0.1% = 0.001，買入價格略高、賣出價格略低",
+    key="sim_slippage",
+)
+
+use_stop_loss = st.sidebar.checkbox(
+    "🛑 止損/止盈執行",
+    value=False,
+    help="根據預測的止損/止盈水平自動平倉（在信號日之間檢查每日價格）",
+    key="sim_stop_loss",
+)
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔬 進階功能")
 
@@ -99,9 +117,27 @@ show_confidence = st.sidebar.checkbox(
 show_monte_carlo = st.sidebar.checkbox(
     "🎲 蒙地卡羅測試",
     value=False,
-    help="隨機翻轉信號1000次，測試策略穩健性",
+    help="隨機翻轉信號，測試策略穩健性",
     key="chk_monte_carlo",
 )
+
+if show_monte_carlo:
+    mc_simulations = st.sidebar.slider(
+        "模擬次數",
+        min_value=100,
+        max_value=5000,
+        value=1000,
+        step=100,
+        key="mc_sims",
+    )
+    mc_flip_prob = st.sidebar.slider(
+        "信號翻轉概率",
+        min_value=0.05,
+        max_value=0.50,
+        value=0.20,
+        step=0.05,
+        key="mc_flip",
+    )
 
 run_simulation = st.sidebar.button("🚀 開始模擬", type="primary", use_container_width=True)
 
@@ -130,6 +166,8 @@ if run_simulation:
                 initial_capital=initial_capital,
                 timeframe=timeframe,
                 optimize_timing=False,
+                slippage_pct=slippage_pct,
+                use_stop_loss=use_stop_loss,
             )
             if result is not None:
                 results[code] = result
@@ -143,6 +181,8 @@ if run_simulation:
                     initial_capital=initial_capital,
                     timeframe=timeframe,
                     optimize_timing=True,
+                    slippage_pct=slippage_pct,
+                    use_stop_loss=use_stop_loss,
                 )
                 if opt_result is not None:
                     opt_results[code] = opt_result
@@ -197,7 +237,7 @@ if run_simulation:
 
     if show_monte_carlo:
         mc_results = {}
-        with st.spinner("🎲 執行蒙地卡羅測試 (1000次模擬)..."):
+        with st.spinner(f"🎲 執行蒙地卡羅測試 ({mc_simulations}次模擬)..."):
             for code in selected_stocks:
                 mc_result = monte_carlo_test(
                     stock_code=code,
@@ -205,8 +245,8 @@ if run_simulation:
                     end_date=end_date.isoformat(),
                     initial_capital=initial_capital,
                     timeframe=timeframe,
-                    n_simulations=1000,
-                    flip_probability=0.2,
+                    n_simulations=mc_simulations,
+                    flip_probability=mc_flip_prob,
                 )
                 if 'error' not in mc_result:
                     mc_results[code] = mc_result
@@ -534,7 +574,7 @@ if 'sim_results' in st.session_state and st.session_state['sim_results']:
         drift_detector = ModelDriftDetector(client)
 
         accuracy_data = []
-        for code in STOCK_LIST:
+        for code in selected_stocks:
             for tf, tf_label in [("1d", "1天"), ("5d", "5天"), ("20d", "20天")]:
                 acc_result = drift_detector.calculate_accuracy(code, tf, days=60)
                 if acc_result.get('accuracy') is not None and acc_result.get('total', 0) > 0:

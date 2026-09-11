@@ -23,6 +23,36 @@ MIN_COMMISSION = 20.0         # Minimum HKD 20 per trade
 STAMP_DUTY_RATE = 0.0013      # 0.13% stamp duty (sell only)
 RISK_FREE_RATE = 0.02         # 2% annual risk-free rate
 
+# HK stock board lot sizes (common stocks)
+LOT_SIZES = {
+    '0005': 400,    # HSBC
+    '0700': 100,    # Tencent
+    '9988': 100,    # Alibaba
+    '0939': 1000,   # CCB
+    '1398': 500,    # ICBC
+    '0001': 500,    # CKH
+    '0002': 500,    # CLP
+    '0003': 500,    # HK & China Gas
+    '0006': 1000,   # Power Assets
+    '0011': 400,    # Hang Seng Bank
+    '0016': 1000,   # SHK Properties
+    '0027': 1000,   # Galaxy Entertainment
+    '0388': 100,    # HKEX
+    '0883': 500,    # CNOOC
+    '0941': 500,    # China Mobile
+    '1299': 200,    # AIA
+    '1810': 200,    # Xiaomi
+    '2318': 500,    # Ping An
+    '2388': 500,    # BOC HK
+    '9618': 100,    # JD.com
+    '9888': 200,    # Baidu
+    '0267': 500,    # CITIC
+    '1211': 500,    # BYD
+    '2020': 200,    # ANTA
+    '9999': 100,    # NetEase
+}
+DEFAULT_LOT_SIZE = 100  # Default if stock not in lookup
+
 
 @dataclass
 class Trade:
@@ -290,6 +320,8 @@ def simulate_investment(
     initial_capital: float = 20000.0,
     timeframe: str = '1d',
     optimize_timing: bool = False,
+    slippage_pct: float = 0.001,
+    use_stop_loss: bool = False,
 ) -> Optional[SimulationResult]:
     """
     Simulate investing in a stock by following Buy/Sell signals.
@@ -302,6 +334,7 @@ def simulate_investment(
         timeframe: Prediction timeframe '1d', '5d', or '20d'
         optimize_timing: If True, find optimal buy/sell day within N-day window
                         (hindsight mode — uses future prices to find best timing)
+        slippage_pct: Slippage as percentage (default 0.1% = 0.001)
 
     Returns:
         SimulationResult or None if no data available
@@ -314,7 +347,7 @@ def simulate_investment(
     try:
         result = (
             client.table('stock_predictions')
-            .select('prediction_date, signal, confidence, stock_code, timeframe')
+            .select('prediction_date, signal, confidence, stock_code, timeframe, stop_loss, take_profit')
             .gte('prediction_date', start_date)
             .lte('prediction_date', end_date)
             .order('prediction_date', desc=False)
@@ -350,6 +383,8 @@ def simulate_investment(
     cash = initial_capital
     shares = 0
     avg_buy_price = 0.0
+    stop_loss_price = None
+    take_profit_price = None
     trade_log = []
     portfolio_history = []
     total_commission = 0.0
@@ -357,6 +392,9 @@ def simulate_investment(
     total_return_pct = 0.0
     wins = 0
     losses = 0
+
+    all_dates = sorted(price_lookup.keys())
+    prev_pred_idx = 0
 
     for pred in predictions:
         pred_date = datetime.strptime(pred['prediction_date'], '%Y-%m-%d').date() if isinstance(pred['prediction_date'], str) else pred['prediction_date']
@@ -372,6 +410,72 @@ def simulate_investment(
             else:
                 continue
 
+        # Check stop-loss/take-profit between signals (if holding)
+        if use_stop_loss and shares > 0 and stop_loss_price is not None:
+            # Find the date range to check
+            curr_idx = None
+            for i, d in enumerate(all_dates):
+                if d >= pred_date:
+                    curr_idx = i
+                    break
+            if curr_idx is not None and prev_pred_idx < curr_idx:
+                for check_idx in range(prev_pred_idx, curr_idx):
+                    check_date = all_dates[check_idx]
+                    check_price = price_lookup[check_date]
+
+                    # Check stop-loss (price dropped below stop-loss)
+                    if check_price <= stop_loss_price:
+                        # Execute stop-loss sell
+                        sl_price = check_price * (1 - slippage_pct)
+                        sale_amount = shares * sl_price
+                        commission = _calc_commission(sale_amount)
+                        stamp_duty = _calc_stamp_duty(sale_amount)
+                        net_proceeds = sale_amount - commission - stamp_duty
+                        pnl = net_proceeds - (shares * avg_buy_price)
+                        cash += net_proceeds
+                        total_commission += commission
+                        total_stamp_duty += stamp_duty
+                        if pnl > 0:
+                            wins += 1
+                        else:
+                            losses += 1
+                        trade_log.append(Trade(
+                            date=check_date, stock_code=stock_code, action='StopLoss',
+                            price=sl_price, shares=shares, cost=commission + stamp_duty, pnl=round(pnl, 2),
+                        ))
+                        shares = 0
+                        avg_buy_price = 0.0
+                        stop_loss_price = None
+                        take_profit_price = None
+                        break
+
+                    # Check take-profit (price rose above take-profit)
+                    if check_price >= take_profit_price:
+                        tp_price = check_price * (1 - slippage_pct)
+                        sale_amount = shares * tp_price
+                        commission = _calc_commission(sale_amount)
+                        stamp_duty = _calc_stamp_duty(sale_amount)
+                        net_proceeds = sale_amount - commission - stamp_duty
+                        pnl = net_proceeds - (shares * avg_buy_price)
+                        cash += net_proceeds
+                        total_commission += commission
+                        total_stamp_duty += stamp_duty
+                        if pnl > 0:
+                            wins += 1
+                        else:
+                            losses += 1
+                        trade_log.append(Trade(
+                            date=check_date, stock_code=stock_code, action='TakeProfit',
+                            price=tp_price, shares=shares, cost=commission + stamp_duty, pnl=round(pnl, 2),
+                        ))
+                        shares = 0
+                        avg_buy_price = 0.0
+                        stop_loss_price = None
+                        take_profit_price = None
+                        break
+
+            prev_pred_idx = curr_idx if curr_idx is not None else prev_pred_idx
+
         # Determine if we should optimize timing
         tf_days = {'1d': 1, '5d': 5, '20d': 20}.get(timeframe, 1)
         use_optimal = optimize_timing and timeframe in ('5d', '20d')
@@ -383,10 +487,15 @@ def simulate_investment(
             else:
                 buy_date, buy_price = pred_date, close_price
 
-            # Buy: invest all cash
+            # Apply slippage (buy price is slightly higher)
+            buy_price = buy_price * (1 + slippage_pct)
+
+            # Buy: invest all cash, using board lots
+            lot_size = LOT_SIZES.get(str(stock_code), DEFAULT_LOT_SIZE)
             commission = _calc_commission(cash)
             investable = cash - commission
-            shares = int(investable / buy_price)
+            max_lots = int(investable / (buy_price * lot_size))
+            shares = max_lots * lot_size
 
             if shares > 0:
                 cost = shares * buy_price
@@ -394,6 +503,15 @@ def simulate_investment(
                 cash -= total_cost
                 total_commission += commission
                 avg_buy_price = buy_price
+
+                # Set stop-loss/take-profit levels if enabled
+                if use_stop_loss:
+                    pred_stop_loss = pred.get('stop_loss', 0)
+                    pred_take_profit = pred.get('take_profit', 0)
+                    if pred_stop_loss and pred_stop_loss != 0:
+                        stop_loss_price = buy_price * (1 + pred_stop_loss / 100)
+                    if pred_take_profit and pred_take_profit != 0:
+                        take_profit_price = buy_price * (1 + pred_take_profit / 100)
 
                 trade_log.append(Trade(
                     date=buy_date,
@@ -413,6 +531,9 @@ def simulate_investment(
                 sell_date, sell_price = _find_optimal_day(price_lookup, pred_date, tf_days, 'Sell')
             else:
                 sell_date, sell_price = pred_date, close_price
+
+            # Apply slippage (sell price is slightly lower)
+            sell_price = sell_price * (1 - slippage_pct)
 
             # Sell: close position
             sale_amount = shares * sell_price
@@ -443,6 +564,8 @@ def simulate_investment(
             logger.info(f"  SELL {sell_date} | {shares} shares @ {sell_price:.2f} | P&L: {pnl:+.2f}")
             shares = 0
             avg_buy_price = 0.0
+            stop_loss_price = None
+            take_profit_price = None
 
         # Record portfolio snapshot at signal date
         stock_value = shares * close_price
@@ -546,6 +669,7 @@ def simulate_all_stocks(
     initial_capital: float = 20000.0,
     timeframe: str = '1d',
     optimize_timing: bool = False,
+    slippage_pct: float = 0.001,
 ) -> dict:
     """
     Run simulation for multiple stocks.
@@ -557,6 +681,7 @@ def simulate_all_stocks(
         initial_capital: Starting capital per stock in HKD
         timeframe: Prediction timeframe
         optimize_timing: If True, find optimal buy/sell day within N-day window
+        slippage_pct: Slippage as percentage (default 0.1%)
 
     Returns:
         Dict mapping stock_code -> SimulationResult
@@ -564,7 +689,7 @@ def simulate_all_stocks(
     results = {}
     for code in stock_codes:
         logger.info(f"Simulating {code}...")
-        result = simulate_investment(code, start_date, end_date, initial_capital, timeframe, optimize_timing)
+        result = simulate_investment(code, start_date, end_date, initial_capital, timeframe, optimize_timing, slippage_pct)
         if result is not None:
             results[code] = result
     return results
@@ -666,8 +791,24 @@ def simulate_portfolio(
     pf = _calc_profit_factor(all_trades)
     avg_hold = _calc_avg_holding_days(all_trades)
 
-    # Combined benchmark
-    benchmark = simulate_buy_and_hold(stock_codes[0], start_date, end_date, total_capital)
+    # Combined benchmark (average of all stocks)
+    benchmarks = []
+    for code in stock_codes:
+        bm = simulate_buy_and_hold(code, start_date, end_date, total_capital / len(stock_codes))
+        if bm is not None:
+            benchmarks.append(bm)
+
+    benchmark = None
+    if benchmarks:
+        from config import SUPABASE_URL, SUPABASE_KEY
+        benchmark = BenchmarkResult(
+            stock_code='PORTFOLIO',
+            initial_capital=total_capital,
+            final_value=round(sum(b.final_value for b in benchmarks), 2),
+            total_return_pct=round(np.mean([b.total_return_pct for b in benchmarks]), 2),
+            shares_bought=sum(b.shares_bought for b in benchmarks),
+            remaining_cash=round(sum(b.remaining_cash for b in benchmarks), 2),
+        )
 
     total_commission = sum(r.total_commission for r in individual_results.values())
     total_stamp_duty = sum(r.total_stamp_duty for r in individual_results.values())

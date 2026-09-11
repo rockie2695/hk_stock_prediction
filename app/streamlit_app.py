@@ -720,7 +720,7 @@ st.plotly_chart(fig_trend, use_container_width=True)
 # --- K-Line Chart with Buy/Sell Signals ---
 st.markdown("---")
 st.subheader("🕯️ K線圖 (含買賣信號)")
-st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置")
+st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置，支持MA均線 (MA5/10/20)")
 
 # Stock selector for K-line chart
 stock_codes_in_df = sorted(df["stock_code"].unique())
@@ -747,12 +747,30 @@ with col_tf:
         key="kline_tf",
     )
 
+# MA overlay checkboxes
+col_ma5, col_ma10, col_ma20 = st.columns(3)
+with col_ma5:
+    show_ma5 = st.checkbox("MA5", value=True, key="chk_ma5")
+with col_ma10:
+    show_ma10 = st.checkbox("MA10", value=True, key="chk_ma10")
+with col_ma20:
+    show_ma20 = st.checkbox("MA20", value=True, key="chk_ma20")
+
 if selected_kline_stock:
     ohlcv_df = get_stock_ohlcv(selected_kline_stock, days=kline_period)
 
     if not ohlcv_df.empty:
         # Drop rows with NaN Close prices
         ohlcv_df = ohlcv_df.dropna(subset=["Close"])
+
+        # Calculate moving averages
+        if show_ma5:
+            ohlcv_df["MA5"] = ohlcv_df["Close"].rolling(window=5).mean()
+        if show_ma10:
+            ohlcv_df["MA10"] = ohlcv_df["Close"].rolling(window=10).mean()
+        if show_ma20:
+            ohlcv_df["MA20"] = ohlcv_df["Close"].rolling(window=20).mean()
+
         # Get predictions for this stock within the OHLCV date range
         min_date = ohlcv_df["Date"].min().date()
         max_date = ohlcv_df["Date"].max().date()
@@ -790,6 +808,21 @@ if selected_kline_stock:
             ),
             row=1, col=1,
         )
+
+        # Add MA lines
+        ma_colors = {"MA5": "#FF6B6B", "MA10": "#4ECDC4", "MA20": "#45B7D1"}
+        for ma_col, ma_color in ma_colors.items():
+            if ma_col in ohlcv_df.columns:
+                fig_kline.add_trace(
+                    go.Scatter(
+                        x=ohlcv_df["Date"],
+                        y=ohlcv_df[ma_col],
+                        name=ma_col,
+                        line=dict(color=ma_color, width=1.5),
+                        opacity=0.8,
+                    ),
+                    row=1, col=1,
+                )
 
         # Volume bars
         colors = [
@@ -944,6 +977,80 @@ if selected_kline_stock:
             st.metric("信號統計", f"Buy: {buy_count} / Sell: {sell_count}")
     else:
         st.info(f"無法載入 {selected_kline_stock} 的價格數據，請稍後再試。")
+
+# --- Stock Comparison View ---
+st.subheader("📊 股票對比")
+st.caption("選擇兩支股票並排比較價格走勢和表現")
+
+col_cmp1, col_cmp2, col_cmp_period = st.columns(3)
+with col_cmp1:
+    cmp_stock1 = st.selectbox(
+        "股票 A",
+        options=stock_codes_in_df,
+        index=0,
+        key="cmp_stock1",
+    )
+with col_cmp2:
+    cmp_stock2 = st.selectbox(
+        "股票 B",
+        options=stock_codes_in_df,
+        index=min(1, len(stock_codes_in_df) - 1),
+        key="cmp_stock2",
+    )
+with col_cmp_period:
+    cmp_period = st.selectbox(
+        "顯示天數",
+        options=[30, 60, 90, 180],
+        index=2,
+        format_func=lambda x: f"{x} 天",
+        key="cmp_period",
+    )
+
+if cmp_stock1 and cmp_stock2:
+    df_cmp1 = get_stock_ohlcv(cmp_stock1, days=cmp_period)
+    df_cmp2 = get_stock_ohlcv(cmp_stock2, days=cmp_period)
+
+    if not df_cmp1.empty and not df_cmp2.empty:
+        # Normalize to percentage change for comparison
+        df_cmp1 = df_cmp1.dropna(subset=["Close"]).copy()
+        df_cmp2 = df_cmp2.dropna(subset=["Close"]).copy()
+
+        df_cmp1["Return_%"] = (df_cmp1["Close"] / df_cmp1["Close"].iloc[0] - 1) * 100
+        df_cmp2["Return_%"] = (df_cmp2["Close"] / df_cmp2["Close"].iloc[0] - 1) * 100
+
+        fig_cmp = go.Figure()
+        fig_cmp.add_trace(go.Scatter(
+            x=df_cmp1["Date"], y=df_cmp1["Return_%"],
+            name=cmp_stock1, line=dict(width=2),
+        ))
+        fig_cmp.add_trace(go.Scatter(
+            x=df_cmp2["Date"], y=df_cmp2["Return_%"],
+            name=cmp_stock2, line=dict(width=2),
+        ))
+        fig_cmp.update_layout(
+            title=f"{cmp_stock1} vs {cmp_stock2} — 累計報酬率 (%)",
+            yaxis_title="累計報酬 (%)",
+            height=400,
+            showlegend=True,
+        )
+        st.plotly_chart(fig_cmp, use_container_width=True)
+
+        # Side-by-side metrics
+        m1_col, m2_col = st.columns(2)
+        for col, sym, d in [(m1_col, cmp_stock1, df_cmp1), (m2_col, cmp_stock2, df_cmp2)]:
+            with col:
+                latest = d.iloc[-1]["Close"]
+                first = d.iloc[0]["Close"]
+                ret = (latest / first - 1) * 100
+                vol = d["Volume"].mean()
+                high = d["High"].max()
+                low = d["Low"].min()
+                st.markdown(f"**{sym}**")
+                st.write(f"最新: HKD {latest:.2f} | 報酬: {ret:+.2f}%")
+                st.write(f"最高: HKD {high:.2f} | 最低: HKD {low:.2f}")
+                st.write(f"平均成交量: {vol:,.0f}")
+    else:
+        st.info("無法載入股票數據進行對比。")
 
 # --- Signal Distribution per Timeframe ---
 st.subheader("📋 信號分佈")
