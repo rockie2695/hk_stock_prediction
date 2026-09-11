@@ -324,11 +324,11 @@ st.sidebar.subheader("📅 日期範圍")
 col_start, col_end = st.sidebar.columns(2)
 with col_start:
     start_date = st.date_input(
-        "開始日期", value=(datetime.now() - timedelta(days=30)).date()
+        "開始日期", value=(datetime.now() - timedelta(days=31)).date()
     )
 with col_end:
     end_date = st.date_input(
-        "結束日期", value=(datetime.now() + timedelta(days=30)).date()
+        "結束日期", value=(datetime.now() + timedelta(days=31)).date()
     )
 
 # Clear cache to force fresh data on date change
