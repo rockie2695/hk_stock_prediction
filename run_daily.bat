@@ -12,7 +12,7 @@ if "%DOW%"=="6" (
     echo Saturday - Market closed, skipping >> logs\run_log.txt
     goto :end
 )
-if "%DOW%"=="7" (
+if "%DOW%"=="0" (
     echo Sunday - Market closed, skipping
     echo Sunday - Market closed, skipping >> logs\run_log.txt
     goto :end
