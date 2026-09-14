@@ -5,6 +5,7 @@ cache/
 models/*.pkl
 models/*.png
 models/*.csv
+models/*.json
 __pycache__/
 *.pyc
 *.pyo

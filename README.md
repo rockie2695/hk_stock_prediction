@@ -22,6 +22,7 @@ Local Windows scheduled training (parallel) → Upload predictions to Supabase (
 - **平行預測**: 多支股票同時預測 / **Parallel Prediction**: Multiple stocks predicted concurrently
 - **SMOTE 類別平衡**: 自動處理正負樣本不平衡問題 / **SMOTE Class Balancing**: Automatically handles positive/negative class imbalance
 - **33項技術指標**: 新增動量、波動率、威廉指標、MFI 等 / **33 Technical Indicators**: Includes momentum, volatility, Williams %R, MFI, etc.
+- **15項擴展特徵**: 情緒分析、板塊輪動、沽空比率、互聯互通資金流、市場狀態偵測 / **15 Extended Features**: Sentiment analysis, sector rotation, short selling, connect flow, market regime detection
 - **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵 / **Feature Correlation Filter**: Auto-removes redundant features with |corr| > 0.9
 - **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45) / **Threshold Optimization**: Auto-searches optimal Buy/Sell confidence thresholds (replaces fixed 0.55/0.45)
 - **模型版本化**: 帶時間戳的模型備份，自動保留最近 5 版，支持回滾 / **Model Versioning**: Timestamped model backups, keeps latest 5 versions, supports rollback
@@ -98,6 +99,15 @@ USE_BLENDING=False
 USE_CATBOOST=True
 USE_SMOTE=True
 USE_GPU=False
+
+# 擴展特徵開關 / Extended feature toggles
+USE_SENTIMENT=True
+USE_SECTOR=True
+USE_SHORT_SELL=True
+USE_CONNECT=True
+USE_REGIME=True
+USE_ONLINE_LEARNING=False
+USE_DYNAMIC_WEIGHTING=False
 ```
 
 **⚠️ 重要 / IMPORTANT:** 先在 [Supabase 官網](https://supabase.com) 取得專案 URL 與金鑰，填入 `.env` 後再執行。 / Obtain your project URL and key from the [Supabase website](https://supabase.com), fill in `.env`, then proceed.
@@ -140,8 +150,10 @@ streamlit run app/streamlit_app.py
   - **📈 K線與指標 / K-line & Indicators**: K線圖 (含買賣信號) + 技術指標 + 股票對比 / K-line chart (with buy/sell signals) + technical indicators + stock comparison
   - **🎯 信心度趨勢 / Confidence Trend**: 信心度變化圖表 + Buy/Sell 閾值線 / Confidence change chart + Buy/Sell threshold lines
   - **📋 預測記錄 / Prediction Records**: 近期預測表格 + 匯出功能 / Recent prediction table + export functionality
-  - **🔍 模型表現 / Model Performance**: 滾動準確度 + 訓練指標 + 模型監控 / Rolling accuracy + training metrics + model monitoring
+  - **🔍 模型表現 / Model Performance**: 滾動準確度 + 訓練指標 + 模型監控 + 市場狀態 / Rolling accuracy + training metrics + model monitoring + market regime
 - **💰 投資模擬器 / Investment Simulator**: 自訂日期範圍、資金、時間範圍，模擬跟單收益 / Custom date range, capital, timeframe, simulates copy-trading returns
+- **📊 策略回測 / Strategy Backtest**: 資金曲線、回撤、交易記錄、對比買入持有 / Equity curve, drawdown, trade log, vs buy-and-hold
+- **💼 投資組合 / Portfolio**: 持倉總覽、信號/信心度分佈、風險暴露 / Holdings, signal/confidence distribution, risk exposure
 
 ### 7. 執行測試 / Run Tests
 
@@ -172,7 +184,16 @@ python -m pytest tests/ -v --tb=short
 | `test_feature_engineering.py` | 17 | RSI、MACD、Bollinger、ATR、ADX、Stochastic、MFI、Williams %R |
 | `test_train_model.py` | 14 | XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending |
 | `test_predict.py` | 10 | 預測日期、模型載入、信號判定、上傳功能 / Prediction dates, model loading, signal determination, upload |
-| **總計 / Total** | **51** | |
+| `test_sentiment.py` | 4 | 新聞情緒特徵計算 / News sentiment feature computation |
+| `test_sector.py` | 4 | 板塊輪動特徵計算 / Sector rotation feature computation |
+| `test_short_selling.py` | 4 | 沽空比率特徵計算 / Short selling feature computation |
+| `test_connect_flow.py` | 4 | 互聯互通資金流特徵計算 / Connect flow feature computation |
+| `test_regime.py` | 4 | 市場狀態偵測 / Market regime detection |
+| `test_online_learner.py` | 3 | 增量學習 / Online learning |
+| `test_dynamic_weighting.py` | 5 | 動態集成權重 / Dynamic ensemble weighting |
+| `test_backtest.py` | 2 | 回測頁面 / Backtest page |
+| `test_portfolio.py` | 2 | 投資組合頁面 / Portfolio page |
+| **總計 / Total** | **85** | |
 
 ## 設定 Windows 自動排程 / Windows Task Scheduler Setup
 
@@ -270,21 +291,33 @@ project_root/
 │   ├── logger.py         # 日誌設定 / Logger configuration
 │   ├── init_database.py  # 自動建表 (冪等) / Auto-create tables (idempotent)
 │   ├── data_fetcher.py   # 下載港股歷史數據 (akshare/yfinance) / Download HK stock data (akshare/yfinance)
-│   ├── feature_engineering.py  # 33項技術指標計算 / 33 technical indicators
+│   ├── feature_engineering.py  # 48項技術指標計算 (33基礎+15擴展) / 48 technical indicators (33 base + 15 extended)
 │   ├── train_model.py    # Optuna 自動調參 + Voting/Stacking 集成 + SMOTE / Optuna tuning + Voting/Stacking ensemble + SMOTE
 │   ├── predict_upload.py # 每日預測並上傳 Supabase / Daily prediction & upload to Supabase
 │   ├── simulator.py      # 投資模擬引擎 (信號模擬、交易成本、績效追蹤) / Investment simulator (signal simulation, costs, performance tracking)
 │   ├── cleanup_old.py    # 清理舊數據 (保留60天) / Cleanup old data (keeps 60 days)
-│   └── model_monitoring.py  # 數據品質、模型漂移、警報、校準 / Data quality, model drift, alerts, calibration
+│   ├── model_monitoring.py  # 數據品質、模型漂移、警報、校準 / Data quality, model drift, alerts, calibration
+│   ├── sentiment.py      # 新聞情緒特徵 / News sentiment features
+│   ├── sector.py         # 板塊輪動特徵 / Sector rotation features
+│   ├── short_selling.py  # 沽空比率特徵 / Short selling features
+│   ├── connect_flow.py   # 互聯互通資金流特徵 / Connect flow features
+│   ├── regime.py         # 市場狀態偵測 (牛/熊/震盪) / Market regime detection (bull/bear/sideways)
+│   ├── online_learner.py # 增量學習 (warm-start) / Online learning (warm-start)
+│   └── dynamic_weighting.py  # 動態集成權重 / Dynamic ensemble weighting
 ├── app/
 │   ├── __init__.py
 │   ├── streamlit_app.py  # Streamlit 預測儀表板 / Streamlit prediction dashboard
 │   └── pages/
-│       └── 1_💰_投資模擬器.py  # 投資模擬互動頁面 / Investment simulator page
+│       ├── __init__.py
+│       ├── 1_💰_投資模擬器.py  # 投資模擬互動頁面 / Investment simulator page
+│       ├── 2_backtest.py      # 策略回測頁面 / Strategy backtest page
+│       └── 3_portfolio.py     # 投資組合頁面 / Portfolio page
 ├── migrate_metrics.sql   # 資料庫遷移: 模型指標欄位 / DB migration: model metrics fields
 ├── migrate_quick_wins.sql # 資料庫遷移: 風險管理欄位 / DB migration: risk management fields
 ├── migrate_thresholds.sql # 資料庫遷移: Buy/Sell 閾值欄位 / DB migration: Buy/Sell threshold fields
-└── migrate_disagreement.sql # 資料庫遷移: 模型分歧指標 / DB migration: model disagreement metrics
+├── migrate_disagreement.sql # 資料庫遷移: 模型分歧指標 / DB migration: model disagreement metrics
+└── migrations/
+    └── 003_extended_features.sql # 擴展特徵說明 (無需資料庫變更) / Extended features docs (no DB changes)
 ```
 
 > **Warning:** `.env` 和 `.pkl` 檔案不應提交至版本控制。`.gitignore` 已配置忽略這些檔案。如果意外提交，請立即從 Git 歷史中清除。 / `.env` and `.pkl` files must NOT be committed to version control. `.gitignore` is configured to ignore them. If accidentally committed, remove them from Git history immediately.
@@ -316,7 +349,9 @@ project_root/
 
 > **Note:** GPU 加速需要 NVIDIA GPU 及已安裝的 NVIDIA 驅動程式。CatBoost GPU 訓練會使用更多記憶體，建議至少 4GB VRAM。非 NVIDIA GPU (如 AMD) 不支援。 / GPU acceleration requires an NVIDIA GPU and installed NVIDIA drivers. CatBoost GPU training uses more memory — at least 4GB VRAM recommended. Non-NVIDIA GPUs (e.g., AMD) are not supported.
 
-### 技術指標 (33 Features) / Technical Indicators (33 Features)
+### 技術指標 (48 Features) / Technical Indicators (48 Features)
+
+**基礎技術指標 (33 Features) / Base Technical Indicators (33 Features)：**
 
 | 類別 / Category | 特徵 / Feature | 說明 / Description |
 |---|---|---|
@@ -338,6 +373,16 @@ project_root/
 | **統計 / Statistics** | `volatility_10d`, `volatility_20d` | 10日/20日波動率 / 10-day/20-day volatility |
 | **市場 / Market** | `hsi_ret_5d`, `hsi_ret_20d` | 恒生指數漲跌幅 / Hang Seng Index return |
 | **匯率 / FX** | `usdhkd_change` | 美元/港幣匯率變化 / USD/HKD exchange rate change |
+
+**擴展特徵 (15 Features) / Extended Features (15 Features)：**
+
+| 類別 / Category | 特徵 / Feature | 說明 / Description |
+|---|---|---|
+| **情緒分析 / Sentiment** | `sentiment_5d`, `sentiment_10d`, `sentiment_change` | 5日/10日情緒分數及變化 (新聞/社群情緒) / 5-day/10-day sentiment score and change (news/social) |
+| **板塊輪動 / Sector** | `sector_momentum_5d`, `sector_momentum_20d`, `sector_vs_hsi` | 板塊動量及相對恒指表現 / Sector momentum and relative HSI performance |
+| **沽空比率 / Short Selling** | `short_sell_ratio`, `short_sell_ratio_5d`, `short_sell_ratio_change` | 即時/5日沽空比率及變化 / Real-time/5-day short selling ratio and change |
+| **互聯互通 / Connect Flow** | `southbound_net_5d`, `southbound_momentum`, `connect_sentiment` | 南向資金淨流入、動量、情緒 / Southbound net inflow, momentum, sentiment |
+| **市場狀態 / Regime** | `market_regime`, `regime_confidence`, `hsi_trend_50_200` | 牛/熊/震盪狀態、信心度、均線比率 / Bull/Bear/Sideways regime, confidence, MA ratio |
 
 ### 模型訓練開關 / Model Training Toggles
 
@@ -691,13 +736,99 @@ A: 滾動準確度 = 最近 30 天內正確預測數 / 總預測數 × 100%。�
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。 / Run tests with pytest: `python -m pytest tests/ -v`. Tests cover env config, feature engineering, model training, prediction upload core functionality.
 
 ### Q: 測試覆蓋了哪些功能？ / What features are covered by tests?
-A: 共 51 個測試，涵蓋： / 51 tests covering:
+A: 共 85 個測試，涵蓋： / 85 tests covering:
 - 環境變數載入與驗證 (10 個) / Env var loading & validation (10)
 - 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個) / Technical indicator calculation: RSI, MACD, ATR, ADX, Stochastic, MFI, Williams %R (17)
 - 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending (14 個) / Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending (14)
 - 預測功能：日期計算、模型載入、信號判定、上傳 (10 個) / Prediction: date calculation, model loading, signal determination, upload (10)
+- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (24 個) / Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (24)
+- 儀表板頁面：回測頁面、投資組合頁面 (4 個) / Dashboard pages: backtest page, portfolio page (4)
+
+### Q: 15 項擴展特徵是什麼？ / What are the 15 Extended Features?
+A: 擴展特徵分為兩階段新增，從外部數據源獲取額外資訊： / Extended features added in two phases, fetching additional data from external sources:
+
+**Phase 1 (10 Features) / 第一階段：**
+- **情緒分析 (3)**: 從新聞/社群獲取市場情緒分數 / **Sentiment (3)**: Market sentiment score from news/social media
+- **板塊輪動 (3)**: 追蹤行業板塊ETF動量，判斷資金輪動方向 / **Sector Rotation (3)**: Tracks sector ETF momentum for fund rotation
+- **沽空比率 (3)**: 監控沽空活動變化，高沽空可能暗示看跌情緒 / **Short Selling (3)**: Monitors short selling activity — high shorting may signal bearish sentiment
+- **互聯互通 (1)**: 南向資金流向反映內地投資者情緒 / **Connect Flow (1)**: Southbound capital flow reflects mainland investor sentiment
+
+**Phase 2 (5 Features) / 第二階段：**
+- **市場狀態 (3)**: 使用恒指 MA50/MA200 交叉判斷牛市/熊市/震盪 / **Regime (3)**: Uses HSI MA50/MA200 crossover for bull/bear/sideways detection
+
+所有擴展特徵在無法獲取數據時自動回退為預設值，不影響核心功能。 / All extended features fall back to defaults when data is unavailable — core functionality is unaffected.
+
+### Q: 市場狀態偵測如何影響預測？ / How does Regime Detection affect predictions?
+A: 市場狀態分為三種：牛市 (MA50>MA200)、熊市 (MA50<MA200)、震盪 (信號混合)。牛市中 Buy 信號更可靠，熊市中 Sell 信號更可靠。儀表板會顯示當前狀態 (🟢/🔴/🟡)，供參考。 / Regime has three states: Bull (MA50>MA200), Bear (MA50<MA200), Sideways (mixed). Buy signals are more reliable in Bull markets, Sell signals in Bear. Dashboard displays current state (🟢/🔴/🟡) for reference.
+
+### Q: 增量學習是什麼？ / What is Online Learning?
+A: 增量學習允許模型在不完全重訓的情況下，用近期數據進行增量更新。當上次全量訓練超過 7 天時，系統會自動使用最近 60 天數據更新模型權重，節省時間和計算資源。目前預設關閉 (USE_ONLINE_LEARNING=False)。 / Online learning allows incremental model updates using recent data without full retraining. When last full train was >7 days ago, system auto-updates with last 60 days of data. Currently disabled by default (USE_ONLINE_LEARNING=False).
+
+### Q: 動態權重如何運作？ / How does Dynamic Weighting work?
+A: 動態權重追蹤每個模型 (XGBoost/LightGBM/RandomForest/CatBoost) 的近期表現，使用 EMA (指數移動平均) 調整集成權重。表現較好的模型獲得較高權重，使集成預測更準確。目前預設關閉 (USE_DYNAMIC_WEIGHTING=False)。 / Dynamic weighting tracks each model's recent performance, uses EMA to adjust ensemble weights. Better-performing models get higher weights. Currently disabled by default (USE_DYNAMIC_WEIGHTING=False).
 
 ## 近期更新 / Recent Updates
+
+### 新增功能 (2026-09-15) / New Features (2026-09-15)
+
+#### Phase 1: Data Features — 10 New Features
+
+| Feature | Module | Description |
+|---|---|---|
+| `sentiment_5d` | `src/sentiment.py` | 5-day rolling news sentiment score from AKShare / 5天滾動新聞情緒分數 |
+| `sentiment_10d` | `src/sentiment.py` | 10-day rolling news sentiment score / 10天滾動新聞情緒分數 |
+| `sentiment_change` | `src/sentiment.py` | Change in sentiment (5d vs 10d) / 情緒變化 (5天 vs 10天) |
+| `sector_momentum_5d` | `src/sector.py` | 5-day sector ETF momentum (XLF, XLK, XLE) / 5天板塊ETF動量 |
+| `sector_momentum_20d` | `src/sector.py` | 20-day sector ETF momentum / 20天板塊ETF動量 |
+| `sector_vs_hsi` | `src/sector.py` | Sector performance relative to HSI / 板塊相對恒指表現 |
+| `short_sell_ratio` | `src/short_selling.py` | Estimated short selling ratio / 估算沽空比率 |
+| `short_sell_ratio_5d` | `src/short_selling.py` | 5-day rolling short sell ratio / 5天滾動沽空比率 |
+| `short_sell_ratio_change` | `src/short_selling.py` | Change in short sell ratio / 沽空比率變化 |
+| `southbound_net_5d` | `src/connect_flow.py` | 5-day net southbound flow / 5天淨南向資金流 |
+| `southbound_momentum` | `src/connect_flow.py` | Southbound flow momentum / 南向資金動量 |
+| `connect_sentiment` | `src/connect_flow.py` | Connect market sentiment / 互聯互通市場情緒 |
+
+#### Phase 2: Model Features — 3 New Features
+
+| Feature | Module | Description |
+|---|---|---|
+| `market_regime` | `src/regime.py` | Market regime: 0=bear, 1=sideways, 2=bull / 市場狀態：0=熊市, 1=震盪, 2=牛市 |
+| `regime_confidence` | `src/regime.py` | Confidence of regime classification (0-1) / 狀態分類信心度 |
+| `hsi_trend_50_200` | `src/regime.py` | HSI 50-day MA vs 200-day MA ratio / 恒指50日均線 vs 200日均線比率 |
+
+#### Phase 3: Dashboard — 2 New Pages
+
+| Page | File | Description |
+|---|---|---|
+| Backtest | `app/pages/2_backtest.py` | Equity curve, drawdown, trade log, vs buy-and-hold benchmark / 資金曲線、回撤、交易記錄、對比買入持有 |
+| Portfolio | `app/pages/3_portfolio.py` | Holdings summary, signal/confidence distribution, risk exposure / 持倉總覽、信號/信心度分佈、風險暴露 |
+
+#### Model Improvements
+
+| Feature | File | Description |
+|---|---|---|
+| Online Learning | `src/online_learner.py` | Incremental model updates with warm-start XGBoost/LightGBM / 增量學習，熱啟動更新模型 |
+| Dynamic Weighting | `src/dynamic_weighting.py` | EMA-based ensemble weight adjustment by recent performance / 基於近期表現的動態集成權重調整 |
+| Market Regime Display | `app/streamlit_app.py` | Regime indicator in signal cards and performance tab / 信號卡片和模型表現分頁顯示市場狀態 |
+
+#### New Environment Variables
+
+```env
+# Phase 1
+USE_SENTIMENT=True     # News sentiment features
+USE_SECTOR=True        # Sector rotation features
+USE_SHORT_SELL=True    # Short selling features
+USE_CONNECT=True       # Northbound/Southbound flow features
+
+# Phase 2
+USE_ONLINE_LEARNING=False   # Incremental model updates
+USE_REGIME=True             # Market regime detection
+USE_DYNAMIC_WEIGHTING=False # Dynamic ensemble weights
+```
+
+**No database schema changes required** — All 15 new features are computed in-memory during training and prediction, and are NOT stored in the database. The `stock_predictions` table schema remains unchanged.
+
+**新增 8 個測試檔案** — 34 個新測試，全部 85 個測試通過。 / **8 new test files** — 34 new tests, all 85 tests passing.
 
 ### 改進項目 (2026-09-12) / Improvements (2026-09-12)
 

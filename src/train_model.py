@@ -37,7 +37,7 @@ warnings.filterwarnings('ignore')
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE, USE_CATBOOST, USE_BLENDING, USE_GPU
 from src.data_fetcher import fetch_stock_data
-from src.feature_engineering import compute_features, compute_target_days, FEATURE_COLUMNS, filter_correlated_features
+from src.feature_engineering import compute_features, compute_target_days, compute_extended_features, FEATURE_COLUMNS, filter_correlated_features
 from src.logger import setup_logger
 
 logger = setup_logger('train_model')
@@ -125,6 +125,12 @@ def prepare_data(stock_codes: list, days: int) -> pd.DataFrame:
             df = compute_features(df)
             df = compute_target_days(df, days)
             df['stock_code'] = code
+            
+            # Compute extended features (sentiment, sector, short selling, etc.)
+            try:
+                df = compute_extended_features(df, code)
+            except Exception as e:
+                logger.warning(f"    Extended features failed for {code}: {e}")
 
             if 'Date' in df.columns:
                 df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()

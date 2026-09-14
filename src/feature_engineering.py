@@ -1,6 +1,8 @@
 """
 Feature engineering - computes technical indicators from OHLCV data.
+特徵工程 - 從 OHLCV 數據計算技術指標。
 CRITICAL: No look-ahead bias. All features use only past/current data.
+關鍵：無前視偏差。所有特徵僅使用過去/當前數據。
 """
 import pandas as pd
 import numpy as np
@@ -8,12 +10,12 @@ from src.logger import setup_logger
 
 logger = setup_logger('feature_engineering')
 
-# All feature columns
+# All feature columns / 所有特徵欄位
 FEATURE_COLUMNS = [
-    # Price features
+    # Price features / 價格特徵
     'ret_1d', 'ret_3d', 'ret_5d', 'ret_10d', 'ret_20d', 'ret_30d',
     'high_low_range', 'close_to_high', 'close_to_low',
-    # Volume features
+    # Volume features / 成交量特徵
     'vol_ratio_5d', 'vol_ratio_10d',
     'obv_change',
     'volume_cv',
@@ -21,11 +23,11 @@ FEATURE_COLUMNS = [
     'rsi_14',
     # MACD
     'macd_diff', 'macd_dea', 'macd_hist',
-    # Bollinger
+    # Bollinger / 布林通道
     'bb_width',
     # ATR
     'atr_14', 'atr_ratio',
-    # Stochastic
+    # Stochastic / 隨機指標
     'stoch_k', 'stoch_d',
     # ADX
     'adx',
@@ -33,13 +35,25 @@ FEATURE_COLUMNS = [
     'mfi',
     # Williams %R
     'williams_r',
-    # Price position
+    # Price position / 價格位置
     'ma50_deviation',
-    # Rolling statistics
+    # Rolling statistics / 滾動統計
     'ret_5d_skew', 'ret_5d_kurt',
     'volatility_10d', 'volatility_20d',
-    # Market context (added dynamically if available)
+    # Market context (added dynamically if available) / 市場背景 (視可用性動態新增)
     # 'hsi_ret_5d', 'usdhkd_change',
+    # === Phase 1 / 第一階段 ===
+    # Sentiment / 情緒
+    'sentiment_5d', 'sentiment_10d', 'sentiment_change',
+    # Sector rotation / 板塊輪動
+    'sector_momentum_5d', 'sector_momentum_20d', 'sector_vs_hsi',
+    # Short selling / 沽空
+    'short_sell_ratio', 'short_sell_ratio_5d', 'short_sell_ratio_change',
+    # Institutional flow / 機構資金流
+    'southbound_net_5d', 'southbound_momentum', 'connect_sentiment',
+    # === Phase 2 / 第二階段 ===
+    # Regime detection / 市場狀態偵測
+    'market_regime', 'regime_confidence', 'hsi_trend_50_200',
 ]
 
 
@@ -126,6 +140,85 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df['volatility_20d'] = df['ret_1d'].rolling(20).std()
 
     logger.info(f"Computed {len(FEATURE_COLUMNS)} features, shape: {df.shape}")
+    return df
+
+
+def compute_extended_features(df: pd.DataFrame, stock_code: str = None) -> pd.DataFrame:
+    """
+    Compute extended features including sentiment, sector, short selling, connect flow, and regime.
+    計算擴展特徵，包括情緒、板塊、沽空、資金流和市場狀態。
+    These features require external data sources and are computed separately.
+    這些特徵需要外部數據源，單獨計算。
+    
+    Args / 參數:
+        df: DataFrame with OHLCV data (from compute_features) / OHLCV 數據
+        stock_code: Stock code for fetching external data / 股票代碼
+        
+    Returns / 返回:
+        DataFrame with extended features added / 新增擴展特徵的 DataFrame
+    """
+    df = df.copy()
+    
+    # Sentiment features / 情緒特徵
+    try:
+        from src.sentiment import compute_sentiment_features
+        if stock_code:
+            df = compute_sentiment_features(df, stock_code)
+        else:
+            df['sentiment_5d'] = 0.0
+            df['sentiment_10d'] = 0.0
+            df['sentiment_change'] = 0.0
+    except Exception:
+        df['sentiment_5d'] = 0.0
+        df['sentiment_10d'] = 0.0
+        df['sentiment_change'] = 0.0
+    
+    # Sector features / 板塊特徵
+    try:
+        from src.sector import compute_sector_features
+        if stock_code:
+            df = compute_sector_features(df, stock_code)
+        else:
+            df['sector_momentum_5d'] = 0.0
+            df['sector_momentum_20d'] = 0.0
+            df['sector_vs_hsi'] = 0.0
+    except Exception:
+        df['sector_momentum_5d'] = 0.0
+        df['sector_momentum_20d'] = 0.0
+        df['sector_vs_hsi'] = 0.0
+    
+    # Short selling features / 沽空特徵
+    try:
+        from src.short_selling import compute_short_selling_features
+        if stock_code:
+            df = compute_short_selling_features(df, stock_code)
+        else:
+            df['short_sell_ratio'] = 0.2
+            df['short_sell_ratio_5d'] = 0.2
+            df['short_sell_ratio_change'] = 0.0
+    except Exception:
+        df['short_sell_ratio'] = 0.2
+        df['short_sell_ratio_5d'] = 0.2
+        df['short_sell_ratio_change'] = 0.0
+    
+    # Connect flow features / 資金流特徵
+    try:
+        from src.connect_flow import compute_connect_features
+        df = compute_connect_features(df)
+    except Exception:
+        df['southbound_net_5d'] = 0.0
+        df['southbound_momentum'] = 0.0
+        df['connect_sentiment'] = 0.0
+    
+    # Regime features / 市場狀態特徵
+    try:
+        from src.regime import compute_regime_features
+        df = compute_regime_features(df)
+    except Exception:
+        df['market_regime'] = 1.0  # default sideways / 預設震盪
+        df['regime_confidence'] = 0.5
+        df['hsi_trend_50_200'] = 0.0
+    
     return df
 
 

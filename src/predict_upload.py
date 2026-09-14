@@ -18,7 +18,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY
 from src.data_fetcher import fetch_stock_data
-from src.feature_engineering import compute_features, FEATURE_COLUMNS
+from src.feature_engineering import compute_features, compute_extended_features, FEATURE_COLUMNS
 from src.logger import setup_logger
 
 logger = setup_logger('predict_upload')
@@ -328,6 +328,12 @@ def predict_stock(stock_code: str, models: dict) -> list:
     # Fetch stock data
     df = fetch_stock_data(stock_code, years=1)
     df = compute_features(df)
+    
+    # Compute extended features (sentiment, sector, etc.)
+    try:
+        df = compute_extended_features(df, stock_code)
+    except Exception as e:
+        logger.warning(f"  Extended features failed for {stock_code}: {e}")
 
     # Ensure Date is datetime and normalized
     if 'Date' in df.columns:

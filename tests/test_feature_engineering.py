@@ -76,10 +76,18 @@ class TestFeatureEngineering:
         assert len(result.columns) > len(sample_stock_data.columns)
     
     def test_compute_features_has_all_feature_columns(self, sample_stock_data):
-        """Test that all FEATURE_COLUMNS are present."""
+        """Test that base FEATURE_COLUMNS are present (excluding extended features added separately)."""
         result = compute_features(sample_stock_data)
+        # Extended features (sentiment, sector, short_selling, connect, regime) are added by compute_extended_features()
+        extended_features = {
+            'sentiment_5d', 'sentiment_10d', 'sentiment_change',
+            'sector_momentum_5d', 'sector_momentum_20d', 'sector_vs_hsi',
+            'short_sell_ratio', 'short_sell_ratio_5d', 'short_sell_ratio_change',
+            'southbound_net_5d', 'southbound_momentum', 'connect_sentiment',
+            'market_regime', 'regime_confidence', 'hsi_trend_50_200',
+        }
         for col in FEATURE_COLUMNS:
-            if col not in ['hsi_ret_5d', 'hsi_ret_20d', 'usdhkd_change']:  # Market features
+            if col not in ['hsi_ret_5d', 'hsi_ret_20d', 'usdhkd_change'] and col not in extended_features:
                 assert col in result.columns, f"Missing feature: {col}"
     
     def test_rsi_computation(self, sample_stock_data):

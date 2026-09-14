@@ -465,13 +465,28 @@ with tab_signals:
                                 icon = "➖"
                             st.caption(f"  {icon} {name} → {desc}")
 
+                # --- Market Regime Display ---
+                try:
+                    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+                    from regime import get_current_regime
+                    regime_data = get_current_regime()
+                    regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}
+                    regime_name = {"bull": "牛市", "bear": "熊市", "sideways": "震盪"}
+                    r = regime_data
+                    st.caption(
+                        f"{regime_emoji.get(r['regime'], '⚪')} 市場狀態: {regime_name.get(r['regime'], r['regime'])} "
+                        f"(信心: {r['confidence']:.0%}, 趨勢: {r['trend']:+.2%})"
+                    )
+                except Exception:
+                    pass
+
         st.markdown("---")
 
 with tab_kline:
     # --- Technical Indicators (Supporting Evidence) ---
     st.subheader("🔬 技術指標 (支持信號依據)")
     st.caption(
-        "以下指標為模型訓練時輸入的 33 項特徵中的關鍵項目。"
+        "以下指標為模型訓練時輸入的 48 項特徵中的關鍵項目 (33 基礎 + 15 擴展)。"
         "同一組指標同時用於預測 **1天 (1d)、5天 (5d)、20天 (20d)** 三個時間範圍的 Buy/Sell 信號。"
         "信心度 = 模型根據這些指標學習到的模式所給出的機率。"
     )
@@ -1287,7 +1302,9 @@ with tab_history:
     # Features explanation
     with st.expander("🔬 模型學習的技術指標 (Features)"):
         st.markdown("""
-        模型使用 **3 年歷史數據** (約 750 交易日) 訓練，從 **OHLCV** + **市場指數** 計算以下 33 項特徵：
+        模型使用 **3 年歷史數據** (約 750 交易日) 訓練，從 **OHLCV** + **市場指數** 計算以下 **48 項特徵** (33 基礎 + 15 擴展)：
+
+        **基礎技術指標 (33 項) / Base Technical Indicators (33)：**
 
         | 類別 | 特徵名稱 | 說明 |
         |---|---|---|
@@ -1309,6 +1326,16 @@ with tab_history:
         | **統計** | `volatility_10d`, `volatility_20d` | 10日/20日波動率 |
         | **市場** | `hsi_ret_5d`, `hsi_ret_20d` | 恒生指數漲跌幅 |
         | **匯率** | `usdhkd_change` | 美元/港幣匯率變化 |
+
+        **擴展特徵 (15 項) / Extended Features (15)：**
+
+        | 類別 | 特徵名稱 | 說明 |
+        |---|---|---|
+        | **情緒分析** | `sentiment_5d`, `sentiment_10d`, `sentiment_change` | 5日/10日情緒分數及變化 (新聞/社群情緒) |
+        | **板塊輪動** | `sector_momentum_5d`, `sector_momentum_20d`, `sector_vs_hsi` | 板塊動量及相對恒指表現 |
+        | **沽空比率** | `short_sell_ratio`, `short_sell_ratio_5d`, `short_sell_ratio_change` | 即時/5日沽空比率及變化 |
+        | **互聯互通** | `southbound_net_5d`, `southbound_momentum`, `connect_sentiment` | 南向資金淨流入、動量、情緒 |
+        | **市場狀態** | `market_regime`, `regime_confidence`, `hsi_trend_50_200` | 牛/熊/震盪狀態、信心度、均線比率 |
 
         **目標變數 (Target)：**
         | 時間範圍 | 說明 |
@@ -1355,6 +1382,36 @@ with tab_performance:
 
     # Get stock codes from config
     STOCK_LIST = os.getenv("STOCK_LIST", "0700,9988,0005,0939").split(",")
+
+    # Market Regime Overview
+    with st.expander("🌐 市場狀態總覽", expanded=True):
+        st.info("""
+        **市場狀態偵測：**
+        使用 HSI 恆生指數的 MA50/MA200 交叉和波動率分析，判斷整體市場環境：
+        - 🟢 **牛市 (Bull)**: MA50 > MA200，價格在均線上方，上升動能
+        - 🔴 **熊市 (Bear)**: MA50 < MA200，價格在均線下方，下降動能
+        - 🟡 **震盪 (Sideways)**: 信號混合，方向不明
+
+        **影響：**
+        牛市中 Buy 信號更可靠，熊市中 Sell 信號更可靠，震盪市場建議觀望。
+        """)
+        try:
+            from regime import get_current_regime
+            regime = get_current_regime()
+            r1, r2, r3 = st.columns(3)
+            regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}
+            regime_name = {"bull": "牛市", "bear": "熊市", "sideways": "震盪"}
+            with r1:
+                st.metric(
+                    "市場狀態",
+                    f"{regime_emoji.get(regime['regime'], '⚪')} {regime_name.get(regime['regime'], regime['regime'])}",
+                )
+            with r2:
+                st.metric("狀態信心度", f"{regime['confidence']:.0%}")
+            with r3:
+                st.metric("HSI 趨勢", f"{regime['trend']:+.2%}")
+        except Exception as e:
+            st.info(f"無法取得市場狀態: {e}")
 
     # Data Quality Checks
     with st.expander("📊 數據品質檢查"):
