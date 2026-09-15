@@ -228,7 +228,7 @@ def compute_short_selling_features(df: pd.DataFrame, stock_code: str) -> pd.Data
 
 def get_latest_short_selling(stock_code: str) -> dict:
     """Get latest short selling data for dashboard / 取得最新沽空數據供儀表板顯示"""
-    short_df = fetch_stock_short_selling(stock_code, days=30) if hasattr(fetch_stock_short_selling, '__call__') else pd.DataFrame()
+    short_df = fetch_stock_short_selling(stock_code, years=1)
     if short_df.empty:
         return {'short_sell_ratio': None, 'short_sell_ratio_5d': None}
     

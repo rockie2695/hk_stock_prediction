@@ -71,9 +71,10 @@ def fetch_sentiment(stock_code: str, days: int = 60) -> pd.DataFrame:
             return pd.DataFrame(columns=['date', 'sentiment_score'])
         
         # Parse dates / 解析日期
+        # AKShare returns column '发布时间' (publish time) / AKShare 返回 '发布时间' 欄位
         date_col = None
         for col in news_df.columns:
-            if '日期' in col or 'date' in col.lower():
+            if '日期' in col or 'date' in col.lower() or '时间' in col or '時間' in col:
                 date_col = col
                 break
         
@@ -83,12 +84,24 @@ def fetch_sentiment(stock_code: str, days: int = 60) -> pd.DataFrame:
         news_df['date'] = pd.to_datetime(news_df[date_col], errors='coerce')
         news_df = news_df.dropna(subset=['date'])
         
+        if news_df.empty:
+            logger.warning(f"No valid dates found for {stock_code} / {stock_code} 無有效日期")
+            return pd.DataFrame(columns=['date', 'sentiment_score'])
+        
         # Simple keyword-based sentiment scoring / 簡單關鍵字情緒評分
+        # Prefer content (新闻内容) over title (新闻标题) for better keyword matching
+        # 優先使用內容而非標題，以獲得更好的關鍵字匹配
         text_col = None
         for col in news_df.columns:
-            if '内容' in col or '标题' in col or 'title' in col.lower() or 'content' in col.lower():
+            if '内容' in col or '内容' in col or 'content' in col.lower():
                 text_col = col
                 break
+        # Fallback to title if no content column found / 若無內容欄位則使用標題
+        if text_col is None:
+            for col in news_df.columns:
+                if '标题' in col or '标题' in col or 'title' in col.lower():
+                    text_col = col
+                    break
         
         if text_col is None:
             text_col = news_df.columns[1] if len(news_df.columns) > 1 else news_df.columns[0]

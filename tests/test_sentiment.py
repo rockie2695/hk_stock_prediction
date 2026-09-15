@@ -76,3 +76,38 @@ class TestSentiment:
         assert result['sentiment_5d'].between(-1, 1).all()
         assert result['sentiment_10d'].between(-1, 1).all()
         assert result['sentiment_change'].between(-2, 2).all()
+
+    def test_fetch_sentiment_returns_articles(self):
+        """Verify fetch_sentiment returns non-zero articles with non-zero scores.
+        驗證 fetch_sentiment 返回非零文章和非零分數。"""
+        from src.sentiment import fetch_sentiment
+        
+        # Clear cache to force fresh fetch / 清除快取以強制重新獲取
+        cache_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'cache', '0700_sentiment.parquet'
+        )
+        if os.path.exists(cache_path):
+            os.remove(cache_path)
+        
+        df = fetch_sentiment('0700', days=30)
+        
+        assert not df.empty, "Sentiment should return articles / 情緒應返回文章"
+        assert len(df) > 0, "Should have at least 1 article / 至少應有1篇文章"
+        assert 'sentiment_score' in df.columns
+        assert 'date' in df.columns
+        # Verify scores are not all zero (news has bullish/bearish keywords)
+        # 驗證分數不全為零 (新聞包含看多/看空關鍵字)
+        assert (df['sentiment_score'] != 0).any(), \
+            "Sentiment scores should have non-zero values from news keywords / 情緒分數應有非零值"
+
+    def test_fetch_sentiment_date_parsing(self):
+        """Verify date column is parsed correctly from AKShare '发布时间'.
+        驗證日期欄位從 AKShare '发布时间' 正確解析。"""
+        from src.sentiment import fetch_sentiment
+        
+        df = fetch_sentiment('0700', days=30)
+        
+        if not df.empty:
+            assert pd.api.types.is_datetime64_any_dtype(df['date']), \
+                "Date column should be datetime type / 日期欄位應為 datetime 類型"

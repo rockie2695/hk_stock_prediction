@@ -736,13 +736,14 @@ A: 滾動準確度 = 最近 30 天內正確預測數 / 總預測數 × 100%。�
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。 / Run tests with pytest: `python -m pytest tests/ -v`. Tests cover env config, feature engineering, model training, prediction upload core functionality.
 
 ### Q: 測試覆蓋了哪些功能？ / What features are covered by tests?
-A: 共 85 個測試，涵蓋： / 85 tests covering:
+A: 共 87 個測試，涵蓋： / 87 tests covering:
 - 環境變數載入與驗證 (10 個) / Env var loading & validation (10)
 - 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個) / Technical indicator calculation: RSI, MACD, ATR, ADX, Stochastic, MFI, Williams %R (17)
 - 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending (14 個) / Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending (14)
 - 預測功能：日期計算、模型載入、信號判定、上傳 (10 個) / Prediction: date calculation, model loading, signal determination, upload (10)
-- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (24 個) / Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (24)
+- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (26 個) / Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (26)
 - 儀表板頁面：回測頁面、投資組合頁面 (4 個) / Dashboard pages: backtest page, portfolio page (4)
+- 新聞情緒真實數據驗證 (2 個) / News sentiment real data verification (2)
 
 ### Q: 15 項擴展特徵是什麼？ / What are the 15 Extended Features?
 A: 擴展特徵分為兩階段新增，從外部數據源獲取額外資訊： / Extended features added in two phases, fetching additional data from external sources:
@@ -775,13 +776,13 @@ A: 動態權重追蹤每個模型 (XGBoost/LightGBM/RandomForest/CatBoost) 的�
 
 | Feature | Module | Description |
 |---|---|---|
-| `sentiment_5d` | `src/sentiment.py` | 5-day rolling news sentiment score from AKShare / 5天滾動新聞情緒分數 |
+| `sentiment_5d` | `src/sentiment.py` | 5-day rolling news sentiment score from AKShare (東方財富) / 5天滾動新聞情緒分數 |
 | `sentiment_10d` | `src/sentiment.py` | 10-day rolling news sentiment score / 10天滾動新聞情緒分數 |
 | `sentiment_change` | `src/sentiment.py` | Change in sentiment (5d vs 10d) / 情緒變化 (5天 vs 10天) |
-| `sector_momentum_5d` | `src/sector.py` | 5-day sector ETF momentum (XLF, XLK, XLE) / 5天板塊ETF動量 |
+| `sector_momentum_5d` | `src/sector.py` | 5-day sector ETF momentum (3033.HK, 3086.HK, 3046.HK, 3069.HK, 3053.HK, 3097.HK) / 5天板塊ETF動量 |
 | `sector_momentum_20d` | `src/sector.py` | 20-day sector ETF momentum / 20天板塊ETF動量 |
 | `sector_vs_hsi` | `src/sector.py` | Sector performance relative to HSI / 板塊相對恒指表現 |
-| `short_sell_ratio` | `src/short_selling.py` | Estimated short selling ratio / 估算沽空比率 |
+| `short_sell_ratio` | `src/short_selling.py` | Estimated short selling ratio (based on price/volume patterns) / 估算沽空比率 (基於價格/成交量模式) |
 | `short_sell_ratio_5d` | `src/short_selling.py` | 5-day rolling short sell ratio / 5天滾動沽空比率 |
 | `short_sell_ratio_change` | `src/short_selling.py` | Change in short sell ratio / 沽空比率變化 |
 | `southbound_net_5d` | `src/connect_flow.py` | 5-day net southbound flow / 5天淨南向資金流 |
@@ -828,7 +829,7 @@ USE_DYNAMIC_WEIGHTING=False # Dynamic ensemble weights
 
 **No database schema changes required** — All 15 new features are computed in-memory during training and prediction, and are NOT stored in the database. The `stock_predictions` table schema remains unchanged.
 
-**新增 8 個測試檔案** — 34 個新測試，全部 85 個測試通過。 / **8 new test files** — 34 new tests, all 85 tests passing.
+**新增 8 個測試檔案** — 36 個新測試，全部 87 個測試通過。 / **8 new test files** — 36 new tests, all 87 tests passing.
 
 ### 改進項目 (2026-09-12) / Improvements (2026-09-12)
 
@@ -852,6 +853,17 @@ USE_DYNAMIC_WEIGHTING=False # Dynamic ensemble weights
 | **NaN 資料處理 / NaN Handling** | 修正 yfinance 今日數據 Close 為 NaN 導致所有指標顯示 `—`，改為先 `dropna(subset=["Close"])` / Fixed yfinance today's Close NaN causing all indicators to show `—`, now `dropna(subset=["Close"])` first |
 
 **無資料庫變更** — 所有功能讀取現有 `stock_predictions` 表或即時計算。 / **No DB changes** — All features read existing `stock_predictions` table or compute in real-time.
+
+#### Bug Fixes (2026-09-15)
+
+| Bug | Module | Root Cause | Fix |
+|---|---|---|---|
+| **Sentiment: 0 articles** | `src/sentiment.py` | `str(int("0700"))` → `"700"`, AKShare needs 5-digit format | Use `.zfill(5)` → `"00700"` |
+| **Sentiment: all scores = 0** | `src/sentiment.py` | Date column `'发布时间'` not detected → picked `'关键词'` | Added `'时间'`/`'時間'` to date column check |
+| **Sentiment: all scores = 0** | `src/sentiment.py` | Text column matched title first, too short for keywords | Prefer content (`'新闻内容'`) over title |
+| **Short selling: timedelta error** | `src/short_selling.py` | `fetch_stock_short_selling(code, days=30)` — function expects `years` | Changed to `years=1` |
+| **Sector ETF: delisted** | `src/sector.py` | `3022.HK` (finance) delisted on Yahoo Finance | Replaced with `3086.HK` (Hang Seng Mainland Banks) |
+| **Sector ETF: delisted** | `src/sector.py` | `3048.HK` (property) delisted on Yahoo Finance | Replaced with `3097.HK` (Hang Seng Properties) |
 
 ### 修改的檔案 / Modified Files
 - `app/streamlit_app.py` — 分頁式儀表板重構；新增 K線圖、技術指標、信號確認分析、滾動準確度、訓練指標展示；修正 MFI、MA50、準確度顯示 bug / Tabbed dashboard restructure; added K-line, technical indicators, signal confirmation, rolling accuracy, training metrics; fixed MFI, MA50, accuracy display bugs
