@@ -28,8 +28,8 @@ SECTOR_CACHE_TTL = 4 * 3600  # 4 hours / 4小時快取
 # HK sector ETFs mapped to yfinance tickers / 港股板塊ETF對應yfinance代碼
 SECTOR_ETFS = {
     'tech': '3033.HK',      # Hang Seng TECH Index ETF / 恒生科技指數ETF
-    'finance': '3022.HK',   # Hang Seng China Enterprises ETF / 恒生中國企業ETF
-    'property': '3048.HK',  # Hang Seng Property ETF / 恒生地產ETF
+    'finance': '3086.HK',   # Hang Seng Mainland Banks ETF / 恒生中國銀行ETF (replacement for delisted 3022.HK)
+    'property': '3097.HK',  # Hang Seng Properties ETF / 恒生物業ETF (replacement for delisted 3048.HK)
     'energy': '3046.HK',    # Hang Seng Energy ETF / 恒生能源ETF
     'healthcare': '3069.HK',# Hang Seng Healthcare ETF / 恒生醫療保健ETF
     'consumer': '3053.HK',  # Hang Seng Consumer ETF / 恒生消費ETF

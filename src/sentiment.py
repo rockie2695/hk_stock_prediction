@@ -60,7 +60,8 @@ def fetch_sentiment(stock_code: str, days: int = 60) -> pd.DataFrame:
     
     try:
         import akshare as ak
-        symbol = str(int(stock_code))
+        # AKShare needs 5-digit format: "0700" → "00700" / AKShare 需要5位數格式
+        symbol = stock_code.zfill(5)
         
         # Fetch news from East Money / 從東方財富獲取新聞
         news_df = ak.stock_news_em(symbol=symbol)
