@@ -1337,6 +1337,126 @@ with tab_history:
         | **互聯互通** | `southbound_net_5d`, `southbound_momentum`, `connect_sentiment` | 南向資金淨流入、動量、情緒 |
         | **市場狀態** | `market_regime`, `regime_confidence`, `hsi_trend_50_200` | 牛/熊/震盪狀態、信心度、均線比率 |
 
+        ---
+
+        **擴展特徵詳細說明 / Extended Features Detailed Explanation：**
+
+        <details>
+        <summary>📰 <b>情緒分析 (Sentiment)</b> — 從東方財富獲取新聞，關鍵字匹配計算情緒分數</summary>
+
+        從東方財富 (AKShare) 獲取個股新聞，使用關鍵字匹配計算情緒分數：
+        - 正面關鍵字 (如「上漲」、「突破」、「利好」) 加分
+        - 負面關鍵字 (如「下跌」、「跌破」、「利空」) 扣分
+        - 分數範圍 -1 (極度看空) 到 +1 (極度看多)
+
+        | 特徵 | 說明 |
+        |---|---|
+        | `sentiment_5d` | 5天滾動情緒平均，反映短期市場情緒 |
+        | `sentiment_10d` | 10天滾動情緒平均，反映中期市場情緒 |
+        | `sentiment_change` | 情緒變化 (5d - 10d)，正數表示情緒改善 |
+
+        **數據來源**: 東方財富新聞 (AKShare) | **快取**: 4小時
+        </details>
+
+        <details>
+        <summary>🏭 <b>板塊輪動 (Sector)</b> — 追蹤6個恒生行業ETF動量，判斷資金輪動方向</summary>
+
+        追蹤6個恒生行業ETF的動量，判斷資金輪動方向：
+
+        | 板塊 | ETF | 說明 |
+        |---|---|---|
+        | 科技 | `3033.HK` | 恒生科技指數ETF |
+        | 金融 | `3086.HK` | 恒生中國銀行ETF |
+        | 地產 | `3097.HK` | 恒生物業ETF |
+        | 能源 | `3046.HK` | 恒生能源ETF |
+        | 醫療 | `3069.HK` | 恒生醫療保健ETF |
+        | 消費 | `3053.HK` | 恒生消費ETF |
+
+        | 特徵 | 說明 |
+        |---|---|
+        | `sector_momentum_5d` | 5天板塊ETF動量，反映短期板塊輪動 |
+        | `sector_momentum_20d` | 20天板塊ETF動量，反映中期板塊輪動 |
+        | `sector_vs_hsi` | 板塊相對恒指表現，反映板塊超額報酬 |
+
+        **數據來源**: Yahoo Finance ETF | **快取**: 4小時
+        </details>
+
+        <details>
+        <summary>📉 <b>沽空比率 (Short Selling)</b> — 監控市場沽空活動，高沽空可能暗示看跌情緒</summary>
+
+        追蹤市場沽空活動變化，使用恒指成交量和價格模式作為代理指標：
+
+        | 特徵 | 說明 |
+        |---|---|
+        | `short_sell_ratio` | 即時沽空比率，反映當前市場看空程度 |
+        | `short_sell_ratio_5d` | 5天滾動沽空比率，反映短期沽空趨勢 |
+        | `short_sell_ratio_change` | 沽空比率變化，正數表示沽空增加 |
+
+        **注意**: 極端沽空 (>0.8) 可能觸發軋空 (short squeeze)，反而是利多信號
+        **數據來源**: Yahoo Finance HSI | **快取**: 4小時
+        </details>
+
+        <details>
+        <summary>🔗 <b>互聯互通 (Connect Flow)</b> — 追蹤南向資金流向，反映內地投資者情緒</summary>
+
+        追蹤南向資金 (內地投資者買港股) 的流向：
+
+        | 特徵 | 說明 |
+        |---|---|
+        | `southbound_net_5d` | 5天淨南向資金流，反映短期資金流向 |
+        | `southbound_momentum` | 南向資金動量，反映資金流入加速度 |
+        | `connect_sentiment` | 互聯互通市場情緒，反映內地投資者情緒 |
+
+        **情緒分數計算邏輯:**
+        | 條件 | 分數 |
+        |---|---|
+        | HSI 5日報酬 > 1% | +0.3 |
+        | HSI 5日報酬 > 3% | +0.5 |
+        | HSI 5日報酬 < -1% | -0.3 |
+        | HSI 5日報酬 < -3% | -0.5 |
+        | 上漲 + 成交量 > 1.5倍均量 | +0.6 |
+        | 下跌 + 成交量 > 1.5倍均量 | -0.6 |
+
+        **數據來源**: Yahoo Finance HSI | **快取**: 4小時
+        </details>
+
+        <details>
+        <summary>🧠 <b>增量學習 (Online Learning)</b> — 用近期數據增量更新模型，無需完全重訓</summary>
+
+        當上次全量訓練超過 7 天時，自動使用最近 60 天數據更新模型：
+
+        | 步驟 | 說明 |
+        |---|---|
+        | 1. 觸發條件 | 上次全量訓練 > 7 天前 |
+        | 2. 訓練數據 | 最近 60 天歷史數據 |
+        | 3. 更新方式 | 使用 warm-start 載入舊模型權重，繼續訓練 |
+        | 4. 模型保存 | 更新後的模型覆蓋當前模型 |
+
+        **注意**: 目前預設關閉 (USE_ONLINE_LEARNING=False)
+        **限制**: 僅更新 XGBoost 和 LightGBM 模型
+        </details>
+
+        <details>
+        <summary>⚖️ <b>動態權重 (Dynamic Weighting)</b> — 根據模型近期表現動態調整集成權重</summary>
+
+        追蹤每個模型的近期表現，使用 EMA 調整集成權重：
+
+        | 機制 | 說明 |
+        |---|---|
+        | 權重初始化 | 新股票/時間範圍使用等權重 (各 25%) |
+        | EMA 更新 | `新權重 = α × 近期表現 + (1-α) × 舊權重` |
+        | 權重正規化 | 確保所有權重總和為 1 |
+        | 最低權重 | 每個模型最低權重 10%，避免完全忽略 |
+
+        **EMA 衰減因子 (α):**
+        - α = 0.3 (預設)：較重視近期表現
+        - α = 0.1：較重視歷史表現
+        - α = 0.5：平衡近期與歷史
+
+        **注意**: 目前預設關閉 (USE_DYNAMIC_WEIGHTING=False)
+        **權重儲存**: `models/dynamic_weights.json`
+        </details>
+
         **目標變數 (Target)：**
         | 時間範圍 | 說明 |
         |---|---|

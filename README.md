@@ -759,14 +759,110 @@ A: 擴展特徵分為兩階段新增，從外部數據源獲取額外資訊： /
 
 所有擴展特徵在無法獲取數據時自動回退為預設值，不影響核心功能。 / All extended features fall back to defaults when data is unavailable — core functionality is unaffected.
 
+### Q: 情緒分析 (Sentiment) 如何運作？ / How does Sentiment Analysis work?
+A: 情緒分析從東方財富 (AKShare) 獲取個股新聞，使用關鍵字匹配計算情緒分數。正面關鍵字 (如「上漲」、「突破」、「利好」) 加分，負面關鍵字 (如「下跌」、「跌破」、「利空」) 扣分。分數範圍 -1 (極度看空) 到 +1 (極度看多)。 / Sentiment analysis fetches stock news from East Money (AKShare), calculates sentiment scores using keyword matching. Positive keywords (e.g., "rise", "breakthrough", "good news") add points, negative keywords (e.g., "fall", "breakdown", "bad news") subtract. Score range: -1 (extremely bearish) to +1 (extremely bullish).
+
+**特徵說明 / Feature Details:**
+| 特徵 | 說明 | 用途 |
+|---|---|---|
+| `sentiment_5d` | 5天滾動情緒平均 / 5-day rolling sentiment average | 短期市場情緒 / Short-term market sentiment |
+| `sentiment_10d` | 10天滾動情緒平均 / 10-day rolling sentiment average | 中期市場情緒 / Mid-term market sentiment |
+| `sentiment_change` | 情緒變化 (5d - 10d) / Sentiment change (5d - 10d) | 情緒動量，正數表示情緒改善 / Sentiment momentum, positive = improving |
+
+**注意事項 / Notes:**
+- 新聞標題比內文更短，關鍵字匹配更精確 / News titles are shorter than content, keyword matching more precise
+- 無新聞時回退為 0 (中性) / Falls back to 0 (neutral) when no news available
+- 快取 4 小時，避免重複請求 / Cached 4 hours to avoid repeated requests
+
+### Q: 板塊輪動 (Sector) 如何運作？ / How does Sector Rotation work?
+A: 板塊輪動追蹤 6 個恒生行業 ETF (科技、金融、地產、能源、醫療、消費) 的動量，判斷資金輪動方向。當某板塊動量強於恒指，表示資金流入該板塊。 / Sector rotation tracks momentum of 6 Hang Seng sector ETFs (Tech, Finance, Property, Energy, Healthcare, Consumer) to identify fund rotation. When a sector's momentum exceeds HSI, funds are flowing into that sector.
+
+**板塊 ETF 對照表 / Sector ETF Mapping:**
+| 板塊 | ETF 代碼 | 說明 |
+|---|---|---|
+| 科技 / Tech | `3033.HK` | 恒生科技指數ETF / Hang Seng TECH Index ETF |
+| 金融 / Finance | `3086.HK` | 恒生中國銀行ETF / Hang Seng Mainland Banks ETF |
+| 地產 / Property | `3097.HK` | 恒生物業ETF / Hang Seng Properties ETF |
+| 能源 / Energy | `3046.HK` | 恒生能源ETF / Hang Seng Energy ETF |
+| 醫療 / Healthcare | `3069.HK` | 恒生醫療保健ETF / Hang Seng Healthcare ETF |
+| 消費 / Consumer | `3053.HK` | 恒生消費ETF / Hang Seng Consumer ETF |
+
+**特徵說明 / Feature Details:**
+| 特徵 | 說明 | 用途 |
+|---|---|---|
+| `sector_momentum_5d` | 5天板塊ETF動量 / 5-day sector ETF momentum | 短期板塊輪動 / Short-term sector rotation |
+| `sector_momentum_20d` | 20天板塊ETF動量 / 20-day sector ETF momentum | 中期板塊輪動 / Mid-term sector rotation |
+| `sector_vs_hsi` | 板塊相對恒指表現 / Sector vs HSI performance | 板塊超額報酬 / Sector excess return |
+
+### Q: 沽空比率 (Short Selling) 如何運作？ / How does Short Selling work?
+A: 沽空比率追蹤市場沽空活動變化。高沽空可能暗示看跌情緒，但極端沽空可能觸發軋空 (short squeeze)。使用 yfinance 恒指數據和成交量模式作為代理指標。 / Short selling ratio tracks market-wide shorting activity. High shorting may signal bearish sentiment, but extreme shorting may trigger a short squeeze. Uses yfinance HSI data and volume patterns as proxy.
+
+**特徵說明 / Feature Details:**
+| 特徵 | 說明 | 用途 |
+|---|---|---|
+| `short_sell_ratio` | 即時沽空比率 / Real-time short selling ratio | 當前市場看空程度 / Current bearish sentiment |
+| `short_sell_ratio_5d` | 5天滾動沽空比率 / 5-day rolling short sell ratio | 短期沽空趨勢 / Short-term shorting trend |
+| `short_sell_ratio_change` | 沽空比率變化 / Short sell ratio change | 沽空動量，正數表示沽空增加 / Shorting momentum, positive = increasing |
+
+**注意事項 / Notes:**
+- 港股沽空數據有延遲 (T+1)，使用成交量模式作為代理 / HK short selling data has T+1 delay, uses volume patterns as proxy
+- 極端沽空 (>0.8) 可能觸發軋空，反而是利多信號 / Extreme shorting (>0.8) may trigger short squeeze, actually bullish
+
+### Q: 互聯互通 (Connect Flow) 如何運作？ / How does Connect Flow work?
+A: 互聯互通追蹤南向資金 (內地投資者買港股) 的流向。南向資金流入增加時，表示內地投資者看好港股。使用恒指成交量和價格模式作為代理指標。 / Connect flow tracks southbound capital (mainland investors buying HK stocks). Increased southbound inflow indicates mainland bullishness on HK stocks. Uses HSI volume and price patterns as proxy.
+
+**特徵說明 / Feature Details:**
+| 特徵 | 說明 | 用途 |
+|---|---|---|
+| `southbound_net_5d` | 5天淨南向資金流 / 5-day net southbound flow | 短期資金流向 / Short-term capital flow |
+| `southbound_momentum` | 南向資金動量 / Southbound flow momentum | 資金流入加速度 / Capital inflow acceleration |
+| `connect_sentiment` | 互聯互通市場情緒 / Connect market sentiment | 內地投資者情緒 / Mainland investor sentiment |
+
+**情緒分數計算邏輯 / Sentiment Score Logic:**
+| 條件 | 分數 | 說明 |
+|---|---|---|
+| HSI 5日報酬 > 1% | +0.3 | 恒指溫和上漲 / Moderate HSI rise |
+| HSI 5日報酬 > 3% | +0.5 | 恒指強勢上漲 / Strong HSI rise |
+| HSI 5日報酬 < -1% | -0.3 | 恒指溫和下跌 / Moderate HSI decline |
+| HSI 5日報酬 < -3% | -0.5 | 恒指強勢下跌 / Strong HSI decline |
+| 上漲 + 成交量 > 1.5倍均量 | +0.6 | 放量上漲，強勢信號 / Rising on high volume, strong signal |
+| 下跌 + 成交量 > 1.5倍均量 | -0.6 | 放量下跌，弱勢信號 / Falling on high volume, weak signal |
+
+### Q: 增量學習 (Online Learning) 如何運作？ / How does Online Learning work?
+A: 增量學習允許模型在不完全重訓的情況下，用近期數據進行增量更新。當上次全量訓練超過 7 天時，系統會自動使用最近 60 天數據更新模型權重，節省時間和計算資源。 / Online learning allows incremental model updates using recent data without full retraining. When last full train was >7 days ago, system auto-updates with last 60 days of data, saving time and compute resources.
+
+**運作機制 / How it Works:**
+1. **觸發條件**: 上次全量訓練 > 7 天前 / **Trigger**: Last full train > 7 days ago
+2. **訓練數據**: 最近 60 天歷史數據 / **Training Data**: Last 60 days of history
+3. **更新方式**: 使用 warm-start (熱啟動) 載入舊模型權重，繼續訓練 / **Update Method**: Uses warm-start to load old model weights, continues training
+4. **模型保存**: 更新後的模型覆蓋當前模型 / **Model Save**: Updated model overwrites current model
+
+**注意事項 / Notes:**
+- 目前預設關閉 (USE_ONLINE_LEARNING=False) / Currently disabled by default (USE_ONLINE_LEARNING=False)
+- 增量學習可能導致模型漂移，建議定期全量重訓 / Online learning may cause model drift,建议定期 full retrain
+- 僅更新 XGBoost 和 LightGBM 模型 / Only updates XGBoost and LightGBM models
+
+### Q: 動態權重 (Dynamic Weighting) 如何運作？ / How does Dynamic Weighting work?
+A: 動態權重追蹤每個模型 (XGBoost/LightGBM/RandomForest/CatBoost) 的近期表現，使用 EMA (指數移動平均) 調整集成權重。表現較好的模型獲得較高權重，使集成預測更準確。 / Dynamic weighting tracks each model's recent performance, uses EMA to adjust ensemble weights. Better-performing models get higher weights, making ensemble predictions more accurate.
+
+**運作機制 / How it Works:**
+1. **權重初始化**: 新股票/時間範圍使用等權重 (各 25%) / **Weight Init**: New stock/timeframe starts with equal weights (25% each)
+2. **EMA 更新**: `新權重 = α × 近期表現 + (1-α) × 舊權重` / **EMA Update**: `New weight = α × recent performance + (1-α) × old weight`
+3. **權重正規化**: 確保所有權重總和為 1 / **Weight Normalization**: Ensures total weights sum to 1
+4. **最低權重**: 每個模型最低權重 10%，避免完全忽略 / **Min Weight**: Each model has 10% floor to avoid complete exclusion
+
+**EMA 衰減因子 / EMA Decay Factor:**
+- α = 0.3 (預設)：較重視近期表現 / α = 0.3 (default): More weight on recent performance
+- α = 0.1：較重視歷史表現 / α = 0.1: More weight on historical performance
+- α = 0.5：平衡近期與歷史 / α = 0.5: Balanced recent vs historical
+
+**注意事項 / Notes:**
+- 目前預設關閉 (USE_DYNAMIC_WEIGHTING=False) / Currently disabled by default (USE_DYNAMIC_WEIGHTING=False)
+- 權重儲存在 `models/dynamic_weights.json` / Weights stored in `models/dynamic_weights.json`
+- 每次預測後自動更新權重 / Weights auto-update after each prediction
+
 ### Q: 市場狀態偵測如何影響預測？ / How does Regime Detection affect predictions?
 A: 市場狀態分為三種：牛市 (MA50>MA200)、熊市 (MA50<MA200)、震盪 (信號混合)。牛市中 Buy 信號更可靠，熊市中 Sell 信號更可靠。儀表板會顯示當前狀態 (🟢/🔴/🟡)，供參考。 / Regime has three states: Bull (MA50>MA200), Bear (MA50<MA200), Sideways (mixed). Buy signals are more reliable in Bull markets, Sell signals in Bear. Dashboard displays current state (🟢/🔴/🟡) for reference.
-
-### Q: 增量學習是什麼？ / What is Online Learning?
-A: 增量學習允許模型在不完全重訓的情況下，用近期數據進行增量更新。當上次全量訓練超過 7 天時，系統會自動使用最近 60 天數據更新模型權重，節省時間和計算資源。目前預設關閉 (USE_ONLINE_LEARNING=False)。 / Online learning allows incremental model updates using recent data without full retraining. When last full train was >7 days ago, system auto-updates with last 60 days of data. Currently disabled by default (USE_ONLINE_LEARNING=False).
-
-### Q: 動態權重如何運作？ / How does Dynamic Weighting work?
-A: 動態權重追蹤每個模型 (XGBoost/LightGBM/RandomForest/CatBoost) 的近期表現，使用 EMA (指數移動平均) 調整集成權重。表現較好的模型獲得較高權重，使集成預測更準確。目前預設關閉 (USE_DYNAMIC_WEIGHTING=False)。 / Dynamic weighting tracks each model's recent performance, uses EMA to adjust ensemble weights. Better-performing models get higher weights. Currently disabled by default (USE_DYNAMIC_WEIGHTING=False).
 
 ## 近期更新 / Recent Updates
 
