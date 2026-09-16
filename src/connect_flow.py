@@ -70,9 +70,8 @@ def fetch_connect_flow(years: int = 1) -> pd.DataFrame:
         end_date = datetime.now(HK_TZ)
         start_date = end_date - timedelta(days=years * 365)
         
-        # Fetch HSI and HSTECH as proxies for flow direction / 獲取恒指和恒生科技指數作為資金流代理
+        # Fetch HSI as proxy for flow direction / 獲取恒指作為資金流代理
         hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False)
-        hstech = yf.download('^HSTECH', start=start_date, end=end_date, progress=False)
         
         if hsi.empty:
             logger.warning("No HSI data for connect flow / 無恒指數據進行資金流分析")
@@ -80,17 +79,12 @@ def fetch_connect_flow(years: int = 1) -> pd.DataFrame:
         
         if isinstance(hsi.columns, pd.MultiIndex):
             hsi.columns = hsi.columns.get_level_values(0)
-        if not hstech.empty and isinstance(hstech.columns, pd.MultiIndex):
-            hstech.columns = hstech.columns.get_level_values(0)
         
         df = hsi[['Close', 'Volume']].copy()
         df.columns = ['hsi_close', 'hsi_volume']
         
-        if not hstech.empty:
-            df = df.join(hstech[['Close']].rename(columns={'Close': 'hstech_close'}), how='left')
-        
         df = df.ffill().reset_index()
-        df.columns = ['date', 'hsi_close', 'hsi_volume'] + (['hstech_close'] if 'hstech_close' in df.columns else [])
+        df.columns = ['date', 'hsi_close', 'hsi_volume']
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None).dt.normalize()
         
         # Estimate Southbound flow using volume and price patterns
