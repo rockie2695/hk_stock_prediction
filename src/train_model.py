@@ -162,7 +162,9 @@ def prepare_data(stock_codes: list, days: int) -> pd.DataFrame:
     combined = combined.dropna(subset=available_features + ['target'])
 
     # Filter highly correlated features to reduce redundancy
-    available_features = filter_correlated_features(combined, available_features, threshold=0.9)
+    # Use 0.95 threshold to keep informative but correlated features
+    # 使用 0.95 閾值保留有資訊量但相關的特徵
+    available_features = filter_correlated_features(combined, available_features, threshold=0.95)
 
     return combined, available_features
 
