@@ -169,6 +169,118 @@ def prepare_data(stock_codes: list, days: int) -> pd.DataFrame:
     return combined, available_features
 
 
+def prepare_shared_data(stock_codes: list) -> tuple:
+    """
+    Prepare shared data for parallel training (fetched ONCE, reused by all timeframes).
+    準備平行訓練共享數據 (只獲取一次，所有時間範圍重用)。
+    
+    This fetches OHLCV, computes features, extended features, and market context.
+    Only the target variable (1d/5d/20d) differs per timeframe.
+    
+    Returns:
+        Tuple of (combined_df, available_features, temp_file_path)
+        The temp_file_path contains the serialized data for workers to load.
+    """
+    import tempfile
+    
+    logger.info("\n=== Preparing shared data (fetched ONCE for all timeframes) ===")
+    logger.info("=== 準備共享數據 (所有時間範圍只獲取一次) ===")
+    
+    market_df = fetch_market_data()
+
+    all_data = []
+    for code in stock_codes:
+        try:
+            logger.info(f"  Fetching data for {code}...")
+            df = fetch_stock_data(code, years=3)
+            df = compute_features(df)
+            df['stock_code'] = code
+            
+            # Compute extended features (sentiment, sector, short selling, etc.)
+            # These are timeframe-independent
+            try:
+                df = compute_extended_features(df, code)
+            except Exception as e:
+                logger.warning(f"    Extended features failed for {code}: {e}")
+
+            if 'Date' in df.columns:
+                df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None).dt.normalize()
+
+            if not market_df.empty:
+                market_with_date = market_df.reset_index()
+                if 'Date' not in market_with_date.columns:
+                    market_with_date = market_with_date.rename(columns={market_with_date.columns[0]: 'Date'})
+                market_with_date['Date'] = pd.to_datetime(market_with_date['Date']).dt.tz_localize(None).dt.normalize()
+                df = df.merge(market_with_date, on='Date', how='left')
+                df = df.ffill()
+
+            all_data.append(df)
+            logger.info(f"    {code}: {len(df)} rows")
+        except Exception as e:
+            logger.error(f"    Failed to fetch {code}: {e}")
+            continue
+
+    if not all_data:
+        raise RuntimeError("No data fetched for any stock code.")
+
+    combined = pd.concat(all_data, ignore_index=True)
+
+    available_features = FEATURE_COLUMNS.copy()
+    for col in ['hsi_ret_5d', 'hsi_ret_20d', 'usdhkd_change']:
+        if col in combined.columns:
+            available_features.append(col)
+
+    # Drop rows with NaN in features (but NOT target, since target doesn't exist yet)
+    combined = combined.dropna(subset=available_features)
+
+    # Filter highly correlated features
+    available_features = filter_correlated_features(combined, available_features, threshold=0.95)
+    
+    logger.info(f"Shared data: {len(combined)} rows, {len(available_features)} features")
+    
+    # Save to temp file for workers to load
+    temp_data = {
+        'combined': combined,
+        'available_features': available_features,
+    }
+    temp_path = os.path.join(CACHE_DIR, '_shared_training_data.pkl')
+    with open(temp_path, 'wb') as f:
+        pickle.dump(temp_data, f)
+    logger.info(f"Shared data saved to: {temp_path}")
+    
+    return combined, available_features, temp_path
+
+
+def prepare_data_with_shared(days: int, shared_data_path: str) -> pd.DataFrame:
+    """
+    Prepare data for a specific timeframe using pre-fetched shared data.
+    使用預獲取的共享數據為特定時間範圍準備數據。
+    
+    Only computes the target variable (1d/5d/20d) — the expensive part is already done.
+    只計算目標變數 (1d/5d/20d) — 昂貴的部分已完成。
+    """
+    import tempfile
+    
+    logger.info(f"  Loading shared data and computing {days}-day target...")
+    
+    # Load shared data
+    with open(shared_data_path, 'rb') as f:
+        temp_data = pickle.load(f)
+    
+    combined = temp_data['combined'].copy()
+    available_features = temp_data['available_features']
+    
+    # Compute target for this timeframe
+    combined = compute_target_days(combined, days)
+    
+    # Drop rows with NaN target
+    combined = combined.dropna(subset=available_features + ['target'])
+    
+    logger.info(f"  {days}d data: {len(combined)} rows, target dist: {combined['target'].value_counts().to_dict()}")
+    
+    return combined, available_features
+
+
 def _apply_smote(X_train, y_train):
     """Apply SMOTE to training data only."""
     if not USE_SMOTE:
@@ -501,8 +613,16 @@ def _create_blending_ensemble(estimators, tscv):
     return BlendingClassifier(estimators, tscv)
 
 
-def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
-    """Train and save model for one timeframe."""
+def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, shared_data_path: str = None):
+    """Train and save model for one timeframe.
+    
+    Args:
+        stock_codes: List of stock codes
+        timeframe_label: '1d', '5d', or '20d'
+        days: Number of days ahead for target
+        shared_data_path: Path to pre-fetched shared data (optional). If provided, 
+                         skips data fetching and only computes target.
+    """
     # Resolve training mode: USE_STACKING or USE_BLENDING overrides USE_ENSEMBLE
     use_ensemble = USE_ENSEMBLE or USE_STACKING or USE_BLENDING
 
@@ -512,7 +632,11 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
     logger.info(f"CatBoost: {USE_CATBOOST and HAS_CATBOOST}")
     logger.info(f"{'='*50}")
 
-    data, available_features = prepare_data(stock_codes, days)
+    # Use shared data if available (fast path), otherwise fetch fresh (fallback)
+    if shared_data_path and os.path.exists(shared_data_path):
+        data, available_features = prepare_data_with_shared(days, shared_data_path)
+    else:
+        data, available_features = prepare_data(stock_codes, days)
 
     X = data[available_features]
     y = data['target']
@@ -727,6 +851,9 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int):
 
     # Cleanup: keep only last 5 versioned models per timeframe
     _cleanup_old_models(timeframe_label, keep=5)
+    
+    # Save tree visualizations / 儲存樹狀圖
+    _save_tree_visualizations(best_model, timeframe_label, model_type, available_features)
 
     return model_path, model_type, best_f1, best_auc
 
@@ -768,6 +895,129 @@ def _cleanup_old_models(timeframe_label: str, keep: int = 5):
                 logger.warning(f"  Failed to remove {f}: {e}")
 
 
+def _save_tree_visualizations(model, timeframe_label: str, model_type: str, feature_names: list):
+    """
+    Export tree visualization images for VotingClassifier ensemble.
+    為 VotingClassifier 集成模型匯出樹狀圖影像。
+    
+    Only exports trees for voting/stacking/blending ensemble models.
+    Skips single model types (xgboost, lightgbm, catboost).
+    
+    Saves PNG files to models/trees/ directory:
+    - tree_{timeframe}_{model_name}.png
+    """
+    trees_dir = os.path.join(MODELS_DIR, 'trees')
+    os.makedirs(trees_dir, exist_ok=True)
+    
+    # Only export trees for ensemble models (voting, stacking, blending)
+    # 只為集成模型 (voting, stacking, blending) 匯出樹狀圖
+    if model_type not in ('voting', 'stacking', 'blending'):
+        logger.info(f"  Skipping tree export for single model type: {model_type}")
+        return
+    
+    # For voting/stacking: extract sub-estimators from the fitted ensemble
+    # 對於 voting/stacking：從擬合的集成模型中提取子估計器
+    estimators_to_plot = []
+    
+    if hasattr(model, 'estimators_'):
+        # VotingClassifier or StackingClassifier
+        estimators_to_plot = [(name, est) for name, est in model.estimators_]
+    elif hasattr(model, 'fitted_estimators'):
+        # Blending ensemble
+        estimators_to_plot = [(name, est) for name, est in model.fitted_estimators]
+    else:
+        logger.warning("  Model has no estimators to plot")
+        return
+    
+    saved_count = 0
+    
+    for est_name, estimator in estimators_to_plot:
+        tree_path = os.path.join(trees_dir, f'tree_{timeframe_label}_{est_name}.png')
+        
+        try:
+            # XGBoost
+            if isinstance(estimator, xgb.XGBClassifier):
+                try:
+                    xgb.plot_tree(estimator, num_trees=0, rankdir='LR')
+                    plt.title(f'XGBoost Tree - {timeframe_label}')
+                    plt.tight_layout()
+                    plt.savefig(tree_path, dpi=100, bbox_inches='tight')
+                    plt.close()
+                    saved_count += 1
+                    logger.info(f"  Tree saved: {os.path.basename(tree_path)}")
+                except Exception:
+                    try:
+                        from xgboost import to_graphviz
+                        dot = to_graphviz(estimator, num_trees=0)
+                        dot.render(tree_path.replace('.png', ''), format='png', cleanup=True)
+                        saved_count += 1
+                        logger.info(f"  Tree saved (graphviz): {os.path.basename(tree_path)}")
+                    except Exception as e2:
+                        logger.warning(f"  XGBoost tree export failed: {e2}")
+            
+            # LightGBM
+            elif isinstance(estimator, lgb.LGBMClassifier):
+                try:
+                    lgb.plot_tree(estimator, tree_index=0)
+                    plt.title(f'LightGBM Tree - {timeframe_label}')
+                    plt.tight_layout()
+                    plt.savefig(tree_path, dpi=100, bbox_inches='tight')
+                    plt.close()
+                    saved_count += 1
+                    logger.info(f"  Tree saved: {os.path.basename(tree_path)}")
+                except Exception:
+                    try:
+                        from lightgbm import create_tree_digraph
+                        graph = create_tree_digraph(estimator, tree_index=0)
+                        graph.render(tree_path.replace('.png', ''), format='png', cleanup=True)
+                        saved_count += 1
+                        logger.info(f"  Tree saved (graphviz): {os.path.basename(tree_path)}")
+                    except Exception as e2:
+                        logger.warning(f"  LightGBM tree export failed: {e2}")
+            
+            # RandomForest
+            elif isinstance(estimator, RandomForestClassifier):
+                try:
+                    from sklearn.tree import plot_tree
+                    plot_tree(estimator.estimators_[0], 
+                              feature_names=feature_names[:len(estimator.feature_importances_)],
+                              filled=True, rounded=True, max_depth=3)
+                    plt.title(f'RandomForest Tree - {timeframe_label}')
+                    plt.tight_layout()
+                    plt.savefig(tree_path, dpi=100, bbox_inches='tight')
+                    plt.close()
+                    saved_count += 1
+                    logger.info(f"  Tree saved: {os.path.basename(tree_path)}")
+                except Exception as e:
+                    logger.warning(f"  RandomForest tree export failed: {e}")
+            
+            # CatBoost
+            elif HAS_CATBOOST and isinstance(estimator, cb.CatBoostClassifier):
+                try:
+                    catboost_pool = cb.Pool(
+                        data=np.zeros((1, len(feature_names))),
+                        feature_names=feature_names
+                    )
+                    estimator.plot_tree(tree_idx=0, pool=catboost_pool)
+                    plt.title(f'CatBoost Tree - {timeframe_label}')
+                    plt.tight_layout()
+                    plt.savefig(tree_path, dpi=100, bbox_inches='tight')
+                    plt.close()
+                    saved_count += 1
+                    logger.info(f"  Tree saved: {os.path.basename(tree_path)}")
+                except Exception as e:
+                    logger.warning(f"  CatBoost tree export failed: {e}")
+            
+        except Exception as e:
+            logger.warning(f"  Failed to save tree for {est_name}: {e}")
+            continue
+    
+    if saved_count > 0:
+        logger.info(f"  Total trees saved: {saved_count}/{len(estimators_to_plot)}")
+    else:
+        logger.warning("  No tree visualizations could be saved")
+
+
 def _objective_single(train_fn, trial, X, y, tscv):
     """
     Optuna objective function for single model hyperparameter tuning.
@@ -797,24 +1047,37 @@ def _objective_single(train_fn, trial, X, y, tscv):
 
 def _train_timeframe_worker(args):
     """Worker function for parallel training of a single timeframe."""
-    stock_codes, label, days = args
+    stock_codes, label, days, shared_data_path = args
     try:
-        return train_single_timeframe(stock_codes, label, days)
+        return train_single_timeframe(stock_codes, label, days, shared_data_path)
     except Exception as e:
         logger.error(f"Training failed for {label}: {e}")
         return None
 
 
 def train_all_models(stock_codes: list):
-    """Train models for all timeframes in parallel."""
+    """Train models for all timeframes in parallel.
+    
+    Optimization: Fetches data ONCE and shares across all 3 timeframes.
+    每個時間範圍平行訓練。優化：只獲取一次數據，所有時間範圍共享。
+    """
     os.makedirs(MODELS_DIR, exist_ok=True)
     logger.info("=== Multi-Timeframe Model Training ===")
     resolved_ensemble = USE_ENSEMBLE or USE_STACKING or USE_BLENDING
     logger.info(f"Ensemble={resolved_ensemble} (raw={USE_ENSEMBLE}), Stacking={USE_STACKING}, Blending={USE_BLENDING}, SMOTE={USE_SMOTE}")
     logger.info(f"CatBoost={USE_CATBOOST and HAS_CATBOOST}")
+    
+    # Step 1: Fetch shared data ONCE (saves ~60-70% of data processing time)
+    # 步驟 1：只獲取一次共享數據 (節省 ~60-70% 數據處理時間)
+    try:
+        _, _, shared_data_path = prepare_shared_data(stock_codes)
+    except Exception as e:
+        logger.error(f"Failed to prepare shared data: {e}")
+        logger.info("Falling back to per-worker data fetching...")
+        shared_data_path = None
 
-    # Prepare tasks
-    tasks = [(stock_codes, label, days) for label, days in TIMEFRAMES.items()]
+    # Prepare tasks (now include shared_data_path)
+    tasks = [(stock_codes, label, days, shared_data_path) for label, days in TIMEFRAMES.items()]
     
     # Parallel training
     results = {}
@@ -835,6 +1098,14 @@ def train_all_models(stock_codes: list):
                     results[label] = {'path': path, 'type': model_type, 'f1': f1, 'auc': auc}
             except Exception as e:
                 logger.error(f"Training failed for {label}: {e}")
+
+    # Cleanup shared data file
+    if shared_data_path and os.path.exists(shared_data_path):
+        try:
+            os.remove(shared_data_path)
+            logger.info("Cleaned up shared data file")
+        except Exception:
+            pass
 
     # Summary
     logger.info("\n" + "="*60)

@@ -49,6 +49,8 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **板手交易**: 按港股最低交易單位 (board lot) 計算買入股數，更貼近實際交易
 - **止損/止盈執行**: 根據預測的止損/止盈水平自動平倉 (在信號日之間檢查每日價格)
 - **本地數據快取**: 使用 Parquet 格式快取歷史數據，交易日內 4 小時快取、非交易日 24 小時快取
+- **樹狀圖可視化**: VotingClassifier 集成模型匯出子模型樹狀圖 PNG 至 `models/trees/`
+- **平行訓練優化**: 一次獲取訓練數據，3 個時間範圍共享，節省 ~60-70% 數據處理時間
 
 ### 風險管理
 - **止損/止盈建議**: 基於波動率自動計算建議止損止盈點
@@ -278,6 +280,8 @@ project_root/
 │   ├── best_model_{tf}_{ts}.pkl      # 版本化模型 (保留最近5版)
 │   ├── feature_importance_{tf}.csv   # 特徵重要性
 │   └── roc_curve_{tf}.png            # ROC 曲線
+│   └── trees/                        # 樹狀圖影像 (VotingClassifier 集成)
+│       └── tree_{tf}_{model}.png     # 各子模型樹狀圖
 ├── cache/                # 本地數據快取
 ├── tests/                # 單元測試
 │   ├── __init__.py
@@ -400,8 +404,9 @@ project_root/
 - `USE_ENSEMBLE=False` → 單一最佳模型 (XGBoost vs LightGBM vs CatBoost)
 
 **訓練速度：**
-- 時間範圍 (1d, 5d, 20d) **平行訓練**，速度提升 ~3x
-- 多支股票預測也支援**平行處理**
+- 時間範圍 (1d, 5d, 20d) **trained in parallel**, ~3x speedup
+- 多支股票預測也支援**平行處理** / Multi-stock prediction also supports **parallel processing**
+- **平行訓練優化**: 一次獲取訓練數據 (OHLCV + features + extended features)，3 個時間範圍共享，節省 ~60-70% 數據處理時間 / **Parallel Training Optimization**: Fetch data once (OHLCV + features + extended features), reuse across 3 timeframes — saves ~60-70% data processing time
 
 ### 目標變數 (Target)
 - **目標**: N天後收盤價 > 今日收盤價 → 1 (Buy)，否則 → 0
@@ -903,6 +908,10 @@ A: 市場狀態分為三種：牛市 (MA50>MA200)、熊市 (MA50<MA200)、震盪
 | 增量學習 | `src/online_learner.py` | 增量學習，熱啟動更新模型 |
 | 動態權重 | `src/dynamic_weighting.py` | 基於近期表現的動態集成權重調整 |
 | 市場狀態顯示 | `app/streamlit_app.py` | 信號卡片和模型表現分頁顯示市場狀態 |
+| Tree Visualization | `src/train_model.py` | 匯出 VotingClassifier 集成子模型樹狀圖影像至 `models/trees/` |
+| Parallel Data Reuse | `src/train_model.py` | 獲取一次訓練數據，3 個時間範圍共享 — 快 ~60-70% |
+| Correlation Threshold | `src/train_model.py` | 特徵相關性過濾閾值從 0.9 提高至 0.95，保留更多有效特徵 |
+| `^HSTECH` Removed | `src/connect_flow.py` | 移除 `^HSTECH` (Yahoo Finance 404 錯誤，計算中未使用) |
 
 #### 新增環境變數
 

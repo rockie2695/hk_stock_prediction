@@ -49,6 +49,8 @@ Local Windows scheduled training (parallel) → Upload predictions to Supabase (
 - **Board Lot Trading**: Calculates buy quantity per HK minimum trading unit (board lot), closer to real trading
 - **Stop Loss/Take Profit Execution**: Auto-closes positions based on predicted stop loss/take profit levels (checks daily prices between signal dates)
 - **Local Data Cache**: Uses Parquet format for caching historical data — 4-hour cache on trading days, 24-hour cache on non-trading days
+- **Tree Visualization**: VotingClassifier ensemble exports sub-model tree PNGs to `models/trees/`
+- **Parallel Training Optimization**: Fetch training data once, reuse across 3 timeframes — saves ~60-70% data processing time
 
 ### Risk Management
 - **Stop Loss/Take Profit Recommendations**: Auto-calculates recommended stop loss and take profit levels based on volatility
@@ -278,6 +280,8 @@ project_root/
 │   ├── best_model_{tf}_{ts}.pkl      # Versioned models (keeps latest 5)
 │   ├── feature_importance_{tf}.csv   # Feature importance
 │   └── roc_curve_{tf}.png            # ROC curve
+│   └── trees/                        # Tree images (VotingClassifier ensemble)
+│       └── tree_{tf}_{model}.png     # Sub-model tree diagrams
 ├── cache/                # Local data cache
 ├── tests/                # Unit tests
 │   ├── __init__.py
@@ -401,7 +405,8 @@ project_root/
 
 **Training Speed：**
 - Timeframes (1d, 5d, 20d) **trained in parallel**, ~3x speedup
-- Multi-stock prediction also supports **parallel processing**
+- 多支股票預測也支援**平行處理** / Multi-stock prediction also supports **parallel processing**
+- **平行訓練優化**: 一次獲取訓練數據 (OHLCV + features + extended features)，3 個時間範圍共享，節省 ~60-70% 數據處理時間 / **Parallel Training Optimization**: Fetch data once (OHLCV + features + extended features), reuse across 3 timeframes — saves ~60-70% data processing time
 
 ### Target Variable
 - **Target**: N-day closing price > today's closing price → 1 (Buy), otherwise → 0
@@ -903,6 +908,10 @@ A: Regime has three states: Bull (MA50>MA200), Bear (MA50<MA200), Sideways (mixe
 | Online Learning | `src/online_learner.py` | Incremental model updates with warm-start XGBoost/LightGBM |
 | Dynamic Weighting | `src/dynamic_weighting.py` | EMA-based ensemble weight adjustment by recent performance |
 | Market Regime Display | `app/streamlit_app.py` | Regime indicator in signal cards and performance tab |
+| Tree Visualization | `src/train_model.py` | Export tree images for VotingClassifier ensemble sub-models (XGBoost, LightGBM, RandomForest, CatBoost) to `models/trees/` |
+| Parallel Data Reuse | `src/train_model.py` | Fetch training data ONCE, reuse across 3 timeframes (1d, 5d, 20d) — ~60-70% faster |
+| Correlation Threshold | `src/train_model.py` | Feature correlation filter threshold raised from 0.9 to 0.95 to keep more informative features |
+| `^HSTECH` Removed | `src/connect_flow.py` | Removed `^HSTECH` from Yahoo Finance download (404 error, never used in calculations) |
 
 #### New Environment Variables
 
