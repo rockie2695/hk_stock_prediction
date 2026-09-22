@@ -55,7 +55,7 @@ def detect_regime(hsi_close: pd.Series) -> pd.DataFrame:
     price_above_ma200 = (hsi_close > ma200).astype(float)
     
     # Volatility regime (20-day rolling std of returns) / 波動率狀態 (20天滾動標準差)
-    returns = hsi_close.pct_change()
+    returns = hsi_close.pct_change(fill_method=None)
     volatility = returns.rolling(20).std()
     vol_percentile = volatility.rolling(60).rank(pct=True)
     
@@ -71,7 +71,7 @@ def detect_regime(hsi_close: pd.Series) -> pd.DataFrame:
     regime_score = regime_score + price_above_ma200 * 0.2
     
     # Trend momentum (5-day return) / 趨勢動量 (5天報酬)
-    momentum = hsi_close.pct_change(5)
+    momentum = hsi_close.pct_change(5, fill_method=None)
     regime_score = regime_score + (momentum > 0.01).astype(float) * 0.15
     regime_score = regime_score - (momentum < -0.01).astype(float) * 0.15
     
@@ -132,7 +132,7 @@ def get_current_regime() -> dict:
         end_date = datetime.now(HK_TZ)
         start_date = end_date - timedelta(days=365 * 2)
         
-        hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False)
+        hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False, auto_adjust=False)
         
         if hsi.empty:
             return {'regime': 'sideways', 'confidence': 0.5, 'trend': 0.0}

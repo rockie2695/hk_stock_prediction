@@ -66,7 +66,7 @@ def fetch_short_selling_data(years: int = 1) -> pd.DataFrame:
         start_date = end_date - timedelta(days=years * 365)
         
         # Use HSI index volume as market proxy / 使用恒指成交量作為市場代理
-        hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False)
+        hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False, auto_adjust=False)
         
         if hsi.empty:
             logger.warning("No market data for short selling analysis / 無市場數據進行沽空分析")
@@ -83,8 +83,8 @@ def fetch_short_selling_data(years: int = 1) -> pd.DataFrame:
         
         # Estimate short selling ratio using volume patterns / 使用成交量模式估算沽空比率
         # Higher volume with price decline suggests short selling pressure / 放量下跌表示沽空壓力
-        df['price_change'] = df['close'].pct_change()
-        df['vol_change'] = df['total_volume'].pct_change()
+        df['price_change'] = df['close'].pct_change(fill_method=None)
+        df['vol_change'] = df['total_volume'].pct_change(fill_method=None)
         
         # Simple heuristic: short ratio increases when price drops and volume rises
         # 簡單啟發式：價格下跌且成交量增加時，沽空比率上升
@@ -135,7 +135,7 @@ def fetch_stock_short_selling(stock_code: str, years: int = 1) -> pd.DataFrame:
         start_date = end_date - timedelta(days=years * 365)
         
         ticker = f"{stock_code}.HK"
-        data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+        data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
         
         if data.empty:
             logger.warning(f"No data for {ticker} / {ticker} 無數據")
@@ -151,7 +151,7 @@ def fetch_stock_short_selling(stock_code: str, years: int = 1) -> pd.DataFrame:
         df['date'] = pd.to_datetime(df['date']).dt.tz_localize(None).dt.normalize()
         
         # Estimate short selling ratio per stock / 估算個股沽空比率
-        df['price_change'] = df['close'].pct_change()
+        df['price_change'] = df['close'].pct_change(fill_method=None)
         df['vol_ma20'] = df['volume'].rolling(20).mean()
         df['vol_ratio'] = df['volume'] / df['vol_ma20'].replace(0, np.nan)
         

@@ -101,6 +101,68 @@ class DataQualityChecker:
         return results
 
 
+def _verify_prediction_outcomes(pred_records: list, price_df: pd.DataFrame, tf_days: int) -> list:
+    """Verify each Buy/Sell prediction against actual price data.
+    驗證每個買入/賣出預測與實際價格數據。
+
+    Buy correct if price rises over the horizon; Sell correct if it falls.
+    買入在期間價格上漲為正確；賣出在價格下跌為正確。
+
+    Args / 參數:
+        pred_records: List of prediction dicts (signal, confidence, prediction_date)
+        price_df: DataFrame with Date and Close columns / 含 Date 與 Close 欄位的 DataFrame
+        tf_days: Target horizon in days / 目標天數
+
+    Returns / 返回:
+        List of {signal, confidence, is_correct} dicts (Buy/Sell only).
+    """
+    if price_df is None or price_df.empty:
+        return []
+    price_df = price_df.copy()
+    price_df['Date'] = pd.to_datetime(price_df['Date']).dt.date
+    price_lookup = dict(zip(price_df['Date'], price_df['Close']))
+    all_dates = sorted(price_lookup.keys())
+
+    outcomes = []
+    for pred in pred_records:
+        pred_date_str = pred.get('prediction_date')
+        if isinstance(pred_date_str, str):
+            try:
+                pred_date = datetime.strptime(pred_date_str, '%Y-%m-%d').date()
+            except ValueError:
+                continue
+        else:
+            pred_date = pred_date_str
+        signal = pred.get('signal')
+        if signal not in ('Buy', 'Sell'):
+            continue
+
+        # Find pred_date index in price data / 在價格數據中尋找 pred_date 索引
+        pred_idx = None
+        for i, d in enumerate(all_dates):
+            if d >= pred_date:
+                pred_idx = i
+                break
+        if pred_idx is None or pred_idx + tf_days >= len(all_dates):
+            continue
+
+        pred_close = price_lookup[all_dates[pred_idx]]
+        target_close = price_lookup[all_dates[pred_idx + tf_days]]
+
+        is_correct = False
+        if signal == 'Buy' and target_close > pred_close:
+            is_correct = True
+        elif signal == 'Sell' and target_close < pred_close:
+            is_correct = True
+
+        outcomes.append({
+            'signal': signal,
+            'confidence': pred.get('confidence'),
+            'is_correct': is_correct,
+        })
+    return outcomes
+
+
 class ModelDriftDetector:
     """Detect model performance degradation over time."""
     
@@ -135,55 +197,14 @@ class ModelDriftDetector:
                 return {'accuracy': None, 'sample_size': 0}
 
             tf_days = {'1d': 1, '5d': 5, '20d': 20}.get(timeframe, 1)
-            correct = 0
-            total = 0
-            buy_correct = 0
-            buy_total = 0
-            sell_correct = 0
-            sell_total = 0
+            outcomes = _verify_prediction_outcomes(pred_result.data, price_df, tf_days)
 
-            for pred in pred_result.data:
-                pred_date_str = pred['prediction_date']
-                if isinstance(pred_date_str, str):
-                    pred_date = datetime.strptime(pred_date_str, '%Y-%m-%d').date()
-                else:
-                    pred_date = pred_date_str
-
-                signal = pred['signal']
-                if signal not in ('Buy', 'Sell'):
-                    continue
-
-                # Find pred_date index in price data
-                pred_idx = None
-                for i, d in enumerate(all_dates):
-                    if d >= pred_date:
-                        pred_idx = i
-                        break
-
-                if pred_idx is None or pred_idx + tf_days >= len(all_dates):
-                    continue
-
-                pred_close = price_lookup[all_dates[pred_idx]]
-                target_close = price_lookup[all_dates[pred_idx + tf_days]]
-
-                total += 1
-                is_correct = False
-                if signal == 'Buy' and target_close > pred_close:
-                    is_correct = True
-                elif signal == 'Sell' and target_close < pred_close:
-                    is_correct = True
-
-                if is_correct:
-                    correct += 1
-
-                if signal == 'Buy':
-                    buy_total += 1
-                    if is_correct:
-                        buy_correct += 1
-                elif signal == 'Sell':
-                    sell_total += 1
-                    if is_correct:
-                        sell_correct += 1
+            total = len(outcomes)
+            correct = sum(1 for o in outcomes if o['is_correct'])
+            buy_total = sum(1 for o in outcomes if o['signal'] == 'Buy')
+            buy_correct = sum(1 for o in outcomes if o['signal'] == 'Buy' and o['is_correct'])
+            sell_total = sum(1 for o in outcomes if o['signal'] == 'Sell')
+            sell_correct = sum(1 for o in outcomes if o['signal'] == 'Sell' and o['is_correct'])
 
             accuracy = (correct / total * 100) if total > 0 else 0
             signal_counts = {p['signal'] for p in pred_result.data}
@@ -478,35 +499,72 @@ class ConfidenceCalibrator:
     def __init__(self, supabase_client):
         self.client = supabase_client
     
-    def calculate_calibration(self, stock_code: str) -> dict:
-        """Calculate calibration metrics."""
+    def calculate_calibration(self, stock_code: str, timeframe: str = '5d', days: int = 120) -> dict:
+        """Calculate real calibration: predicted confidence vs actual hit rate.
+        計算真實校準：預測信心度 vs 實際命中率。
+
+        Returns ECE (expected calibration error, lower is better) plus a per-bucket
+        calibration curve. Confidence is verified against actual price moves.
+        回傳 ECE (期望校準誤差，越低越好) 及每個分桶的校準曲線。
+        信心度會與實際價格變動進行驗證。
+        """
         try:
-            # Get predictions with outcomes
+            # Get predictions / 取得預測
             result = self.client.table('stock_predictions').select(
                 'confidence', 'signal', 'prediction_date'
-            ).eq('stock_code', stock_code).order('created_at', desc=True).limit(200).execute()
-            
+            ).eq('stock_code', stock_code).eq('timeframe', timeframe).order(
+                'created_at', desc=True).limit(200).execute()
+
             if not result.data or len(result.data) < 20:
                 return {'calibration_score': None, 'message': '數據不足，無法計算校準指標'}
-            
-            df = pd.DataFrame(result.data)
-            
-            # Group by confidence buckets
-            df['confidence_bucket'] = pd.cut(df['confidence'], bins=10)
-            
-            # Calculate average confidence per bucket
-            calibration = df.groupby('confidence_bucket', observed=True)['confidence'].mean()
-            
-            # Ideal calibration: confidence should match actual win rate
-            # For now, return basic stats
+
+            # Fetch price data to verify outcomes / 取得價格數據以驗證結果
+            try:
+                price_df = fetch_stock_data(stock_code, years=1)
+            except Exception as e:
+                return {'calibration_score': None, 'message': f'無法取得價格數據: {e}'}
+
+            tf_days = {'1d': 1, '5d': 5, '20d': 20}.get(timeframe, 5)
+            outcomes = _verify_prediction_outcomes(result.data, price_df, tf_days)
+            if len(outcomes) < 10:
+                return {'calibration_score': None, 'sample_size': len(outcomes), 'message': '可驗證樣本不足'}
+
+            df = pd.DataFrame(outcomes).dropna(subset=['confidence'])
+
+            # Bucket by confidence (0.1 steps) and compute actual hit rate per bucket
+            # 依信心度分桶 (0.1 步長) 並計算每桶實際命中率
+            df['confidence_bucket'] = (df['confidence'] // 0.1) * 0.1
+            curve = []
+            weighted_error_sum = 0.0
+            n = 0
+            for bucket, grp in df.groupby('confidence_bucket'):
+                avg_conf = grp['confidence'].mean()
+                hit_rate = grp['is_correct'].mean()
+                count = len(grp)
+                curve.append({
+                    'bucket': round(float(bucket), 2),
+                    'avg_confidence': round(float(avg_conf), 4),
+                    'hit_rate': round(float(hit_rate), 4),
+                    'count': int(count),
+                })
+                # ECE: |confidence - hit_rate| weighted by bucket size / 依桶大小加權
+                weighted_error_sum += abs(avg_conf - hit_rate) * count
+                n += count
+
+            ece = weighted_error_sum / n if n > 0 else None
+
             return {
-                'avg_confidence': df['confidence'].mean(),
-                'std_confidence': df['confidence'].std(),
+                'calibration_score': round(float(ece), 4) if ece is not None else None,
+                'avg_confidence': round(float(df['confidence'].mean()), 4),
+                'std_confidence': round(float(df['confidence'].std()), 4),
                 'confidence_range': {
-                    'min': df['confidence'].min(),
-                    'max': df['confidence'].max()
+                    'min': float(df['confidence'].min()),
+                    'max': float(df['confidence'].max())
                 },
-                'sample_size': len(df)
+                'sample_size': len(outcomes),
+                'calibration_curve': curve,
+                'message': '校準分數 (ECE) 越低越好，表示信心度越貼近實際命中率'
+                           if ece is not None else '無法計算 ECE',
             }
         except Exception as e:
             return {'calibration_score': None, 'error': str(e)}

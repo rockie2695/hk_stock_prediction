@@ -71,12 +71,14 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
     # --- Price features ---
-    df['ret_1d'] = df['Close'].pct_change(1)
-    df['ret_3d'] = df['Close'].pct_change(3)
-    df['ret_5d'] = df['Close'].pct_change(5)
-    df['ret_10d'] = df['Close'].pct_change(10)
-    df['ret_20d'] = df['Close'].pct_change(20)
-    df['ret_30d'] = df['Close'].pct_change(30)
+    # fill_method=None: no padding across gap days (prevents phantom 0% returns)
+    # fill_method=None：不跨缺口日填補 (防止虛假的 0% 報酬)
+    df['ret_1d'] = df['Close'].pct_change(1, fill_method=None)
+    df['ret_3d'] = df['Close'].pct_change(3, fill_method=None)
+    df['ret_5d'] = df['Close'].pct_change(5, fill_method=None)
+    df['ret_10d'] = df['Close'].pct_change(10, fill_method=None)
+    df['ret_20d'] = df['Close'].pct_change(20, fill_method=None)
+    df['ret_30d'] = df['Close'].pct_change(30, fill_method=None)
 
     # Intraday range
     df['high_low_range'] = (df['High'] - df['Low']) / df['Close']
@@ -92,7 +94,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
 
     # OBV change
     obv = _compute_obv(df)
-    df['obv_change'] = obv.pct_change(5)
+    df['obv_change'] = obv.pct_change(5, fill_method=None)
 
     # --- RSI (14-day) ---
     df['rsi_14'] = _compute_rsi(df['Close'], period=14)

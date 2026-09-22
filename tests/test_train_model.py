@@ -226,6 +226,97 @@ class TestModelTraining:
         assert proba.shape == (10, 2)
 
 
+class TestPurgeAndClassWeights:
+    """Tests for purge/embargo CV and class-weight toggle."""
+
+    def test_purged_splits_removes_overlapping_training(self):
+        """Verify purged splits drop training samples whose label window overlaps validation."""
+        import src.train_model as tm
+        from sklearn.model_selection import TimeSeriesSplit
+        np.random.seed(42)
+        n = 750
+        X = pd.DataFrame(np.random.randn(n, 5))
+        tscv = TimeSeriesSplit(n_splits=5)
+        splits = tm._purged_splits(tscv, X, days=20)
+        assert len(splits) == 5
+        for train_idx, val_idx in splits:
+            assert len(train_idx) > 0 and len(val_idx) > 0
+            assert set(train_idx).isdisjoint(val_idx)
+            val_start = val_idx[0]
+            # Every remaining train index must satisfy i + 21 < val_start
+            assert (np.array(train_idx) + 21 < val_start).all()
+
+    def test_purged_splits_no_days_keeps_original(self):
+        """When days=None, _purged_splits should return original splits unchanged."""
+        import src.train_model as tm
+        from sklearn.model_selection import TimeSeriesSplit
+        np.random.seed(42)
+        X = pd.DataFrame(np.random.randn(200, 5))
+        tscv = TimeSeriesSplit(n_splits=3)
+        splits = tm._purged_splits(tscv, X, days=None)
+        assert len(splits) == 3
+        for train_idx, val_idx in splits:
+            # Without purge: train = indices 0..val_start-1
+            assert len(train_idx) == val_idx[0]
+
+    def test_purged_splits_small_dataset_fallback(self):
+        """When purging leaves <60 train rows, original fold is kept."""
+        import src.train_model as tm
+        from sklearn.model_selection import TimeSeriesSplit
+        np.random.seed(42)
+        X = pd.DataFrame(np.random.randn(200, 5))
+        tscv = TimeSeriesSplit(n_splits=5)
+        splits = tm._purged_splits(tscv, X, days=20)
+        # Should still return 5 splits (fallback for small folds)
+        assert len(splits) == 5
+
+    def test_scale_pos_weight_enabled(self):
+        """scale_pos_weight returns minority/majority ratio when USE_CLASS_WEIGHTS=True."""
+        import src.train_model as tm
+        y = pd.Series([0]*30 + [1]*10)
+        with patch.object(tm, 'USE_CLASS_WEIGHTS', True):
+            w = tm._scale_pos_weight(y)
+        assert abs(w - 3.0) < 0.01
+
+    def test_scale_pos_weight_disabled(self):
+        """scale_pos_weight returns 1.0 when USE_CLASS_WEIGHTS=False."""
+        import src.train_model as tm
+        y = pd.Series([0]*30 + [1]*10)
+        with patch.object(tm, 'USE_CLASS_WEIGHTS', False):
+            w = tm._scale_pos_weight(y)
+        assert w == 1.0
+
+    def test_scale_pos_weight_caps_at_3(self):
+        """scale_pos_weight is capped at 3.0 for extreme imbalance."""
+        import src.train_model as tm
+        y = pd.Series([0]*100 + [1]*5)
+        with patch.object(tm, 'USE_CLASS_WEIGHTS', True):
+            assert tm._scale_pos_weight(y) == 3.0
+
+    def test_build_default_voting(self, sample_training_data):
+        """_build_default_voting returns a VotingClassifier with predict_proba."""
+        import src.train_model as tm
+        X, y = sample_training_data
+        model = tm._build_default_voting(X, y)
+        assert hasattr(model, 'predict_proba')
+        proba = model.predict_proba(X[:10])
+        assert proba.shape == (10, 2)
+
+    def test_walk_forward_backtest(self, sample_training_data, tmp_path):
+        """_walk_forward_backtest returns stats dict and saves CSV."""
+        import src.train_model as tm
+        X, y = sample_training_data
+        data = X.copy()
+        data['Close'] = 100 * (1 + np.random.randn(len(X)) * 0.01).cumprod()
+        data['target'] = y
+        with patch.object(tm, 'MODELS_DIR', str(tmp_path)):
+            stats = tm._walk_forward_backtest(data, X.columns.tolist(), days=5, timeframe_label='5d')
+        assert stats is not None
+        assert 'f1' in stats and 'auc' in stats
+        assert 0 <= stats['auc'] <= 1
+        assert (tmp_path / 'walk_forward_5d.csv').exists()
+
+
 class TestModelMetadata:
     """Test model metadata and saving."""
     

@@ -49,7 +49,7 @@ Local Windows scheduled training (parallel) → Upload predictions to Supabase (
 - **Board Lot Trading**: Calculates buy quantity per HK minimum trading unit (board lot), closer to real trading
 - **Stop Loss/Take Profit Execution**: Auto-closes positions based on predicted stop loss/take profit levels (checks daily prices between signal dates)
 - **Local Data Cache**: Uses Parquet format for caching historical data — 4-hour cache on trading days, 24-hour cache on non-trading days
-- **Tree Visualization**: VotingClassifier ensemble exports sub-model tree PNGs to `models/trees/`
+- **Tree Visualization**: VotingClassifier ensemble exports sub-model images to `models/trees/` (RandomForest = actual tree structure; XGBoost / LightGBM / CatBoost = feature importance bar charts, pure matplotlib — no Graphviz required)
 - **Parallel Training Optimization**: Fetch training data once, reuse across 3 timeframes — saves ~60-70% data processing time
 
 ### Risk Management
@@ -101,6 +101,8 @@ USE_BLENDING=False
 USE_CATBOOST=True
 USE_SMOTE=True
 USE_GPU=False
+USE_CLASS_WEIGHTS=True
+USE_WALK_FORWARD=True
 
 # Extended feature toggles
 USE_SENTIMENT=True
@@ -184,18 +186,20 @@ python -m pytest tests/ -v --tb=short
 |---|---|---|
 | `test_config.py` | 10 | Env vars, stock list parsing, Supabase config |
 | `test_feature_engineering.py` | 17 | RSI, MACD, Bollinger, ATR, ADX, Stochastic, MFI, Williams %R |
-| `test_train_model.py` | 14 | XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending |
-| `test_predict.py` | 10 | Prediction dates, model loading, signal determination, upload |
-| `test_sentiment.py` | 4 | News sentiment feature computation |
+| `test_train_model.py` | 22 | XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Purge/Embargo CV, Class-weight, Walk-forward |
+| `test_predict.py` | 13 | Prediction dates, model loading, signal determination, upload, same-day dedup, dynamic ensemble proba |
+| `test_sentiment.py` | 6 | News sentiment feature computation (incl. real-data validation) |
 | `test_sector.py` | 4 | Sector rotation feature computation |
 | `test_short_selling.py` | 4 | Short selling feature computation |
-| `test_connect_flow.py` | 4 | Connect flow feature computation |
-| `test_regime.py` | 4 | Market regime detection |
-| `test_online_learner.py` | 3 | Online learning |
+| `test_connect_flow.py` | 6 | Connect flow feature computation, real data fallback, proxy mode |
+| `test_regime.py` | 5 | Market regime detection |
+| `test_online_learner.py` | 4 | Online learning |
 | `test_dynamic_weighting.py` | 5 | Dynamic ensemble weighting |
+| `test_model_monitoring.py` | 8 | Prediction validation, confidence calibration (ECE) |
+| `test_notifier.py` | 7 | Telegram notifications (incl. truncation, enable/disable) |
 | `test_backtest.py` | 2 | Backtest page |
 | `test_portfolio.py` | 2 | Portfolio page |
-| **Total** | **85** | |
+| **Total** | **115** | |
 
 ## Windows Task Scheduler Setup
 
@@ -280,15 +284,17 @@ project_root/
 │   ├── best_model_{tf}_{ts}.pkl      # Versioned models (keeps latest 5)
 │   ├── feature_importance_{tf}.csv   # Feature importance
 │   └── roc_curve_{tf}.png            # ROC curve
-│   └── trees/                        # Tree images (VotingClassifier ensemble)
-│       └── tree_{tf}_{model}.png     # Sub-model tree diagrams
+│   └── trees/                        # Sub-model images (VotingClassifier ensemble)
+│       └── tree_{tf}_{model}.png     # RF=tree structure / XGB·LGB·CB=feature importance
 ├── cache/                # Local data cache
 ├── tests/                # Unit tests
 │   ├── __init__.py
 │   ├── test_config.py           # Config module tests
 │   ├── test_feature_engineering.py  # Feature engineering tests
-│   ├── test_train_model.py      # Model training tests
-│   └── test_predict.py          # Prediction upload tests
+│   ├── test_train_model.py      # Model training tests (incl. Purge/Embargo, Class-weight, Walk-forward)
+│   ├── test_predict.py          # Prediction upload tests (incl. dedup, dynamic proba)
+│   ├── test_model_monitoring.py # Calibration validation, ECE computation
+│   └── test_notifier.py         # Telegram notification tests
 ├── src/
 │   ├── __init__.py
 │   ├── logger.py         # Logger configuration
@@ -306,7 +312,8 @@ project_root/
 │   ├── connect_flow.py   # Connect flow features
 │   ├── regime.py         # Market regime detection (bull/bear/sideways)
 │   ├── online_learner.py # Online learning (warm-start)
-│   └── dynamic_weighting.py  # Dynamic ensemble weighting
+│   ├── dynamic_weighting.py  # Dynamic ensemble weighting
+│   └── notifier.py      # Telegram failure notifications (optional)
 ├── app/
 │   ├── __init__.py
 │   ├── streamlit_app.py  # Streamlit prediction dashboard
@@ -396,7 +403,9 @@ project_root/
 | `USE_BLENDING` | `False` | Use Blending (out-of-fold stacking, usually more accurate) |
 | `USE_CATBOOST` | `True` | Include CatBoost as 4th model |
 | `USE_SMOTE` | `True` | Enable SMOTE class imbalance handling |
+| `USE_CLASS_WEIGHTS` | `True` | Class-imbalance weights (usually no-op when SMOTE=True) |
 | `USE_GPU` | `False` | CatBoost GPU training (requires NVIDIA GPU, uses more memory) |
+| `USE_WALK_FORWARD` | `True` | Purged walk-forward backtest after training |
 
 **Priority Rules：**
 - `USE_STACKING=True` or `USE_BLENDING=True` → Forces ensemble mode
@@ -737,14 +746,15 @@ A: Rolling accuracy = correct predictions in last 30 days / total predictions ×
 A: Run tests with pytest: `python -m pytest tests/ -v`. Tests cover env config, feature engineering, model training, prediction upload core functionality.
 
 ### Q: What features are covered by tests?
-A: 87 tests covering:
+A: 115 tests covering:
 - Env var loading & validation (10)
 - Technical indicator calculation: RSI, MACD, ATR, ADX, Stochastic, MFI, Williams %R (17)
-- Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending (14)
-- Prediction: date calculation, model loading, signal determination, upload (10)
-- Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (26)
+- Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Purge/Embargo CV, Walk-forward (22)
+- Prediction: date calculation, model loading, signal determination, upload, same-day dedup, dynamic ensemble proba (13)
+- Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (34)
+- Model monitoring: prediction validation, confidence calibration ECE (8)
+- Telegram notifications: truncation, enable/disable (7)
 - Dashboard pages: backtest page, portfolio page (4)
-- News sentiment real data verification (2)
 
 ### Q: What are the 15 Extended Features?
 A: Extended features added in two phases, fetching additional data from external sources:
@@ -908,7 +918,7 @@ A: Regime has three states: Bull (MA50>MA200), Bear (MA50<MA200), Sideways (mixe
 | Online Learning | `src/online_learner.py` | Incremental model updates with warm-start XGBoost/LightGBM |
 | Dynamic Weighting | `src/dynamic_weighting.py` | EMA-based ensemble weight adjustment by recent performance |
 | Market Regime Display | `app/streamlit_app.py` | Regime indicator in signal cards and performance tab |
-| Tree Visualization | `src/train_model.py` | Export tree images for VotingClassifier ensemble sub-models (XGBoost, LightGBM, RandomForest, CatBoost) to `models/trees/` |
+| Tree Visualization | `src/train_model.py` | Export sub-model images for VotingClassifier ensemble to `models/trees/` (RF=tree structure, XGB/LGB/CB=feature importance, pure matplotlib — no Graphviz required) |
 | Parallel Data Reuse | `src/train_model.py` | Fetch training data ONCE, reuse across 3 timeframes (1d, 5d, 20d) — ~60-70% faster |
 | Correlation Threshold | `src/train_model.py` | Feature correlation filter threshold raised from 0.9 to 0.95 to keep more informative features |
 | `^HSTECH` Removed | `src/connect_flow.py` | Removed `^HSTECH` from Yahoo Finance download (404 error, never used in calculations) |
@@ -926,11 +936,40 @@ USE_CONNECT=True       # Northbound/Southbound flow features
 USE_ONLINE_LEARNING=False   # Incremental model updates
 USE_REGIME=True             # Market regime detection
 USE_DYNAMIC_WEIGHTING=False # Dynamic ensemble weights
+
+# Robustness
+USE_CLASS_WEIGHTS=True      # Class-imbalance weights (usually no-op with SMOTE)
+USE_WALK_FORWARD=True       # Purged walk-forward backtest after training
+
+# Notifications (optional, leave blank to disable)
+TELEGRAM_BOT_TOKEN=         # Telegram Bot Token
+TELEGRAM_CHAT_ID=           # Telegram Chat ID
 ```
 
 **No database schema changes required** — All 15 new features are computed in-memory during training and prediction, and are NOT stored in the database. The `stock_predictions` table schema remains unchanged.
 
-**8 new test files** — 36 new tests, all 87 tests passing.
+**10 new test files** — 66 new tests, all 115 tests passing.
+
+### Robustness Improvements (2026-09-21)
+
+| Improvement | File | Description |
+|---|---|---|
+| Purge/Embargo CV | `src/train_model.py` | `_purged_splits()` — TimeSeriesSplit with purge window + 1-day embargo to prevent train-validation leakage from overlapping label windows |
+| Class-weight toggle | `src/train_model.py` | `USE_CLASS_WEIGHTS` env var — independently toggle scale_pos_weight / auto_class_weights (usually no-op with SMOTE) |
+| Walk-forward backtest | `src/train_model.py` | `_walk_forward_backtest()` — automatic purged expanding-window backtest after training, saves CSV + chart to `models/` |
+| Same-day dedup | `src/predict_upload.py` | `upload_to_supabase()` — checks existing (stock_code, prediction_date, timeframe), UPDATEs instead of duplicate INSERT |
+| Real confidence calibration | `src/model_monitoring.py` | `calculate_calibration()` — ECE (Expected Calibration Error) + calibration curve using real price validation |
+| Real southbound flow | `src/connect_flow.py` | `_fetch_real_southbound()` — real southbound capital data from AKShare `stock_hsgt_hist_em`, yfinance fallback |
+| Crash-safe cleanup | `src/train_model.py` | `train_all_models()` — try/finally ensures `_shared_training_data.pkl` temp file cleaned even on exceptions |
+| pct_change fix | `src/*.py` | All `pct_change()` calls use `fill_method=None` — eliminates pandas FutureWarning + phantom returns across gaps |
+| auto_adjust pinned | `src/*.py` | All `yf.download()` use `auto_adjust=False` — unadjusted prices (consistent with training data) |
+
+### Notifications & Ops (2026-09-21)
+
+| Improvement | File | Description |
+|---|---|---|
+| Telegram notifications | `src/notifier.py` | Send Telegram alert on training/prediction failure (optional, leave blank to disable) |
+| Dynamic ensemble proba | `src/predict_upload.py` | `_dynamic_ensemble_proba()` — dynamically weights sub-models by recent accuracy using EMA |
 
 ### Improvements (2026-09-12)
 

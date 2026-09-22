@@ -85,7 +85,7 @@ def fetch_sector_data(years: int = 1) -> pd.DataFrame:
         all_data = {}
         for sector_name, ticker in SECTOR_ETFS.items():
             try:
-                data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=False)
                 if not data.empty:
                     if isinstance(data.columns, pd.MultiIndex):
                         data.columns = data.columns.get_level_values(0)
@@ -108,8 +108,8 @@ def fetch_sector_data(years: int = 1) -> pd.DataFrame:
         for col in list(sector_df.columns):
             if col.endswith('_close'):
                 sector_name = col.replace('_close', '')
-                sector_df[f'{sector_name}_ret_5d'] = sector_df[col].pct_change(5)
-                sector_df[f'{sector_name}_ret_20d'] = sector_df[col].pct_change(20)
+        sector_df[f'{sector_name}_ret_5d'] = sector_df[col].pct_change(5, fill_method=None)
+        sector_df[f'{sector_name}_ret_20d'] = sector_df[col].pct_change(20, fill_method=None)
         
         # Save cache / 儲存快取
         try:

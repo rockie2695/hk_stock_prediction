@@ -49,7 +49,7 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **板手交易**: 按港股最低交易單位 (board lot) 計算買入股數，更貼近實際交易
 - **止損/止盈執行**: 根據預測的止損/止盈水平自動平倉 (在信號日之間檢查每日價格)
 - **本地數據快取**: 使用 Parquet 格式快取歷史數據，交易日內 4 小時快取、非交易日 24 小時快取
-- **樹狀圖可視化**: VotingClassifier 集成模型匯出子模型樹狀圖 PNG 至 `models/trees/`
+- **樹狀圖可視化**: VotingClassifier 集成匯出子模型影像至 `models/trees/`（RandomForest 為實際樹結構；XGBoost / LightGBM / CatBoost 為特徵重要性長條圖，純 matplotlib 無需 Graphviz）
 - **平行訓練優化**: 一次獲取訓練數據，3 個時間範圍共享，節省 ~60-70% 數據處理時間
 
 ### 風險管理
@@ -184,18 +184,20 @@ python -m pytest tests/ -v --tb=short
 |---|---|---|
 | `test_config.py` | 10 | 環境變數、股票列表解析、Supabase 設定 |
 | `test_feature_engineering.py` | 17 | RSI、MACD、Bollinger、ATR、ADX、Stochastic、MFI、Williams %R |
-| `test_train_model.py` | 14 | XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending |
-| `test_predict.py` | 10 | 預測日期、模型載入、信號判定、上傳功能 |
-| `test_sentiment.py` | 4 | 新聞情緒特徵計算 |
+| `test_train_model.py` | 22 | XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Purge/Embargo CV、Class-weight 開關、Walk-forward 回測 |
+| `test_predict.py` | 13 | 預測日期、模型載入、信號判定、上傳功能、同日去重 (dedup)、動態集成機率 |
+| `test_sentiment.py` | 6 | 新聞情緒特徵計算 (含真實數據驗證) |
 | `test_sector.py` | 4 | 板塊輪動特徵計算 |
 | `test_short_selling.py` | 4 | 沽空比率特徵計算 |
-| `test_connect_flow.py` | 4 | 互聯互通資金流特徵計算 |
+| `test_connect_flow.py` | 6 | 互聯互通資金流特徵計算、真實數據回退、代理模式 |
 | `test_regime.py` | 4 | 市場狀態偵測 |
 | `test_online_learner.py` | 3 | 增量學習 |
 | `test_dynamic_weighting.py` | 5 | 動態集成權重 |
+| `test_model_monitoring.py` | 8 | 預測驗證、信心度校準 (ECE) |
+| `test_notifier.py` | 7 | Telegram 通知 (含截斷、啟用/停用) |
 | `test_backtest.py` | 2 | 回測頁面 |
 | `test_portfolio.py` | 2 | 投資組合頁面 |
-| **總計** | **85** | |
+| **總計** | **115** | |
 
 ## 設定 Windows 自動排程
 
@@ -280,14 +282,17 @@ project_root/
 │   ├── best_model_{tf}_{ts}.pkl      # 版本化模型 (保留最近5版)
 │   ├── feature_importance_{tf}.csv   # 特徵重要性
 │   └── roc_curve_{tf}.png            # ROC 曲線
-│   └── trees/                        # 樹狀圖影像 (VotingClassifier 集成)
-│       └── tree_{tf}_{model}.png     # 各子模型樹狀圖
+│   └── trees/                        # 子模型可視化 (VotingClassifier 集成)
+│       └── tree_{tf}_{model}.png     # RF=樹結構 / XGB·LGB·CB=特徵重要性
 ├── cache/                # 本地數據快取
 ├── tests/                # 單元測試
 │   ├── __init__.py
 │   ├── test_config.py           # 設定模組測試
 │   ├── test_feature_engineering.py  # 特徵工程測試
-│   ├── test_train_model.py      # 模型訓練測試
+│   ├── test_train_model.py      # 模型訓練測試 (含 Purge/Embargo、Class-weight、Walk-forward)
+│   ├── test_predict.py          # 預測上傳測試 (含去重、動態機率)
+│   ├── test_model_monitoring.py # 校準驗證、ECE 計算
+│   ├── test_notifier.py         # Telegram 通知
 │   └── test_predict.py          # 預測上傳測試
 ├── src/
 │   ├── __init__.py
@@ -306,7 +311,8 @@ project_root/
 │   ├── connect_flow.py   # 互聯互通資金流特徵
 │   ├── regime.py         # 市場狀態偵測 (牛/熊/震盪)
 │   ├── online_learner.py # 增量學習 (warm-start)
-│   └── dynamic_weighting.py  # 動態集成權重
+│   ├── dynamic_weighting.py  # 動態集成權重
+│   └── notifier.py      # Telegram 失敗通知 (可選)
 ├── app/
 │   ├── __init__.py
 │   ├── streamlit_app.py  # Streamlit 預測儀表板
@@ -332,9 +338,10 @@ project_root/
 - **集成方式**: VotingClassifier (soft voting) 或 StackingClassifier (元模型 = LogisticRegression) 或 Blending (out-of-fold)
 - **超參數優化**: Optuna (50 trials，同時搜尋四個模型 + voting 權重)
 - **權重優化**: Optuna 自動搜尋最佳權重組合 (如 [0.3, 0.3, 0.2, 0.2])，非固定 1:1:1:1
-- **交叉驗證**: TimeSeriesSplit (n_splits=5)，嚴格遵守時序，不洩漏未來資訊
-- **類別不平衡處理**: SMOTE (僅在訓練折上套用，不跨越驗證折)
+- **交叉驗證**: TimeSeriesSplit (n_splits=5) + Purge/Embargo (防止標籤視窗重疊洩漏)
+- **類別不平衡處理**: SMOTE (僅在訓練折上套用) + Class-weight (USE_CLASS_WEIGHTS)
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
+- **走動前推回測**: 訓練後自動執行 purged walk-forward backtest，驗證真實表現
 - **評估指標**: F1 Score, AUC, Precision, Recall
 - **ROC 曲線**: 自動儲存至 `models/roc_curve_{timeframe}.png`
 - **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵
@@ -396,7 +403,9 @@ project_root/
 | `USE_BLENDING` | `False` | 使用 Blending (out-of-fold stacking，通常更準確) |
 | `USE_CATBOOST` | `True` | 包含 CatBoost 作為第4個模型 |
 | `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
+| `USE_CLASS_WEIGHTS` | `True` | 啟用類別不平衡權重 (SMOTE=True 時通常無效) |
 | `USE_GPU` | `False` | CatBoost 使用 GPU 訓練 (需要 NVIDIA GPU，會使用更多記憶體) |
+| `USE_WALK_FORWARD` | `True` | 訓練後自動執行走動前推回測 |
 
 **優先級規則：**
 - `USE_STACKING=True` 或 `USE_BLENDING=True` → 強制使用集成模式
@@ -737,14 +746,15 @@ A: 滾動準確度 = 最近 30 天內正確預測數 / 總預測數 × 100%。�
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。
 
 ### Q: 測試覆蓋了哪些功能？
-A: 共 87 個測試，涵蓋：
+A: 共 115 個測試，涵蓋：
 - 環境變數載入與驗證 (10 個)
 - 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個)
-- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending (14 個)
-- 預測功能：日期計算、模型載入、信號判定、上傳 (10 個)
-- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (26 個)
+- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Purge/Embargo CV、Walk-forward (22 個)
+- 預測功能：日期計算、模型載入、信號判定、上傳、同日去重、動態集成機率 (13 個)
+- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (34 個)
+- 模型監控：預測驗證、信心度校準 ECE (8 個)
+- Telegram 通知：截斷、啟用/停用 (7 個)
 - 儀表板頁面：回測頁面、投資組合頁面 (4 個)
-- 新聞情緒真實數據驗證 (2 個)
 
 ### Q: 15 項擴展特徵是什麼？
 A: 擴展特徵分為兩階段新增，從外部數據源獲取額外資訊：
@@ -908,10 +918,31 @@ A: 市場狀態分為三種：牛市 (MA50>MA200)、熊市 (MA50<MA200)、震盪
 | 增量學習 | `src/online_learner.py` | 增量學習，熱啟動更新模型 |
 | 動態權重 | `src/dynamic_weighting.py` | 基於近期表現的動態集成權重調整 |
 | 市場狀態顯示 | `app/streamlit_app.py` | 信號卡片和模型表現分頁顯示市場狀態 |
-| Tree Visualization | `src/train_model.py` | 匯出 VotingClassifier 集成子模型樹狀圖影像至 `models/trees/` |
+| Tree Visualization | `src/train_model.py` | 匯出 VotingClassifier 子模型影像至 `models/trees/`（RF=樹結構，XGB/LGB/CB=特徵重要性，純 matplotlib 無需 Graphviz） |
 | Parallel Data Reuse | `src/train_model.py` | 獲取一次訓練數據，3 個時間範圍共享 — 快 ~60-70% |
 | Correlation Threshold | `src/train_model.py` | 特徵相關性過濾閾值從 0.9 提高至 0.95，保留更多有效特徵 |
 | `^HSTECH` Removed | `src/connect_flow.py` | 移除 `^HSTECH` (Yahoo Finance 404 錯誤，計算中未使用) |
+
+#### 模型穩健性改進 (2026-09-21)
+
+| 功能 | 檔案 | 說明 |
+|---|---|---|
+| Purge/Embargo CV | `src/train_model.py` | `_purged_splits()` — TimeSeriesSplit 加入 purge 視窗 + 1天 embargo，防止標籤視窗重疊造成訓練-驗證洩漏 |
+| Class-weight 開關 | `src/train_model.py` | `USE_CLASS_WEIGHTS` 環境變數，可獨立切換 scale_pos_weight / auto_class_weights (配合 SMOTE 使用時通常無效) |
+| Walk-forward Backtest | `src/train_model.py` | `_walk_forward_backtest()` — 訓練後自動在 purged 擴展窗口上回測，儲存 CSV + 圖表至 `models/` |
+| 同日去重 | `src/predict_upload.py` | `upload_to_supabase()` — 查詢既有 (stock_code, prediction_date, timeframe)，改為 UPDATE 而非重複 INSERT |
+| 真實信心度校準 | `src/model_monitoring.py` | `calculate_calibration()` — 使用真實價格驗證計算 ECE (Expected Calibration Error) + 校準曲線 |
+| 真實南向資金流 | `src/connect_flow.py` | `_fetch_real_southbound()` — 從 AKShare `stock_hsgt_hist_em` 獲取真實南向資金數據，yfinance 作為 fallback |
+| 崩潰安全清理 | `src/train_model.py` | `train_all_models()` — try/finally 確保 `_shared_training_data.pkl` 暫存檔在異常時也能清理 |
+| pct_change 修正 | `src/*.py` | 所有 `pct_change()` 呼叫加入 `fill_method=None`，消除 pandas FutureWarning + 避免缺口日幻影報酬 |
+| auto_adjust 固定 | `src/*.py` | 所有 `yf.download()` 統一 `auto_adjust=False`，保留未調整價格 (與訓練數據一致) |
+
+#### 通知與運維 (2026-09-21)
+
+| 功能 | 檔案 | 說明 |
+|---|---|---|
+| Telegram 通知 | `src/notifier.py` | 訓練或預測失敗時發送 Telegram 通知 (可選，留空停用) |
+| 動態集成機率 | `src/predict_upload.py` | `_dynamic_ensemble_proba()` — 根據近期準確度動態調整子模型權重，使用 EMA 更新 |
 
 #### 新增環境變數
 
@@ -926,11 +957,19 @@ USE_CONNECT=True       # 南向資金流特徵
 USE_ONLINE_LEARNING=False   # 增量模型更新
 USE_REGIME=True             # 市場狀態偵測
 USE_DYNAMIC_WEIGHTING=False # 動態集成權重
+
+# 穩健性改進
+USE_CLASS_WEIGHTS=True      # 類別不平衡權重 (SMOTE=True 時通常無效)
+USE_WALK_FORWARD=True       # 訓練後走動前推回測
+
+# 通知 (可選，留空停用)
+TELEGRAM_BOT_TOKEN=         # Telegram Bot Token
+TELEGRAM_CHAT_ID=           # Telegram Chat ID
 ```
 
 **無需資料庫變更** — 所有 15 項新特徵在訓練和預測時即時計算，不會存入資料庫。`stock_predictions` 表結構保持不變。
 
-**新增 8 個測試檔案** — 36 個新測試，全部 87 個測試通過。
+**新增 8 個測試檔案** — 58 個新測試，全部 115 個測試通過。
 
 ### 改進項目 (2026-09-12)
 

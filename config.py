@@ -39,6 +39,8 @@ USE_SMOTE = os.getenv("USE_SMOTE", "True").lower() in ("true", "1", "t")
 USE_CATBOOST = os.getenv("USE_CATBOOST", "True").lower() in ("true", "1", "t")
 USE_BLENDING = os.getenv("USE_BLENDING", "False").lower() in ("true", "1", "t")
 USE_GPU = os.getenv("USE_GPU", "False").lower() in ("true", "1", "t")  # GPU for CatBoost / GPU 用於 CatBoost
+USE_CLASS_WEIGHTS = os.getenv("USE_CLASS_WEIGHTS", "True").lower() in ("true", "1", "t")  # Class-imbalance weights / 類別不平衡權重
+USE_WALK_FORWARD = os.getenv("USE_WALK_FORWARD", "True").lower() in ("true", "1", "t")  # Training-time walk-forward backtest / 訓練時走動前推回測
 
 # Extended feature switches (Phase 1) / 擴展特徵開關 (第一階段)
 USE_SENTIMENT = os.getenv("USE_SENTIMENT", "True").lower() in ("true", "1", "t")  # 情緒分析

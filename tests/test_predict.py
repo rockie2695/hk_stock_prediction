@@ -277,6 +277,61 @@ class TestPredictUpload:
 class TestPredictUploadEdgeCases:
     """Test edge cases in prediction."""
     
+    def test_upload_dedup_updates_existing(self):
+        """When (stock_code, prediction_date, timeframe) exists, update instead of insert."""
+        import src.predict_upload as pu
+        records = [
+            {'stock_code': '0700', 'prediction_date': '2024-01-10', 'timeframe': '1d',
+             'signal': 'Buy', 'confidence': 0.65, 'model_version': 'v1', 'model_type': 'xgboost',
+             'f1_score': 0.6, 'auc_score': 0.55}
+        ]
+        mock_client = MagicMock()
+        # Dedup query returns this existing row
+        dup_res = MagicMock()
+        dup_res.data = [{'stock_code': '0700', 'prediction_date': '2024-01-10', 'timeframe': '1d'}]
+        mock_client.table.return_value.select.return_value.in_.return_value.execute.return_value = dup_res
+        # Make update().eq().eq().eq().execute() work
+        update_chain = mock_client.table.return_value.update.return_value
+        update_chain.eq.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock()
+        with patch.object(pu, 'get_supabase_client', return_value=mock_client):
+            success, fail = pu.upload_to_supabase(records)
+        assert success == 1 and fail == 0
+        mock_client.table.return_value.update.assert_called()
+
+    def test_upload_dedup_inserts_new(self):
+        """When (stock_code, prediction_date, timeframe) does not exist, insert."""
+        import src.predict_upload as pu
+        records = [
+            {'stock_code': '0700', 'prediction_date': '2024-01-10', 'timeframe': '1d',
+             'signal': 'Buy', 'confidence': 0.65, 'model_version': 'v1', 'model_type': 'xgboost',
+             'f1_score': 0.6, 'auc_score': 0.55}
+        ]
+        mock_client = MagicMock()
+        dup_res = MagicMock()
+        dup_res.data = []  # No existing rows
+        mock_client.table.return_value.select.return_value.in_.return_value.execute.return_value = dup_res
+        with patch.object(pu, 'get_supabase_client', return_value=mock_client):
+            success, fail = pu.upload_to_supabase(records)
+        assert success == 1 and fail == 0
+        mock_client.table.return_value.insert.assert_called()
+
+    def test_dynamic_ensemble_proba_non_ensemble(self, sample_prediction_data):
+        """_dynamic_ensemble_proba returns direct prediction for non-ensemble models."""
+        import src.predict_upload as pu
+        from sklearn.linear_model import LogisticRegression
+        # Build a simple model (no estimators_ attribute → non-ensemble path)
+        X = sample_prediction_data[['ret_1d', 'rsi_14']].iloc[:-1].copy()
+        X = X.fillna(0)
+        yy = (sample_prediction_data['ret_1d'].shift(-1) > 0).astype(int).iloc[:-1]
+        model = LogisticRegression(max_iter=200)
+        model.fit(X, yy)
+        model_data = {'model': model, 'feature_columns': X.columns.tolist()}
+        Xrow = sample_prediction_data.iloc[-1:][['ret_1d', 'rsi_14']].fillna(0)
+        p = pu._dynamic_ensemble_proba(
+            model_data, Xrow, '0700', '1d',
+            sample_prediction_data, sample_prediction_data)
+        assert 0.0 <= p <= 1.0
+
     def test_fetch_market_features(self):
         """Test market features fetching."""
         import src.predict_upload as pu

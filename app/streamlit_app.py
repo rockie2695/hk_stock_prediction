@@ -14,6 +14,7 @@ Dashboard features:
 
 import os
 import sys
+import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 import streamlit as st
@@ -26,6 +27,7 @@ from plotly.subplots import make_subplots
 # Load .env from project root
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 
 # Page config
 st.set_page_config(
@@ -468,7 +470,7 @@ with tab_signals:
                 # --- Market Regime Display ---
                 try:
                     sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-                    from regime import get_current_regime
+                    from src.regime import get_current_regime
                     regime_data = get_current_regime()
                     regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}
                     regime_name = {"bull": "牛市", "bear": "熊市", "sideways": "震盪"}
@@ -1487,7 +1489,7 @@ with tab_performance:
 
     # Import monitoring functions
     sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-    from model_monitoring import (
+    from src.model_monitoring import (
         DataQualityChecker,
         ModelDriftDetector,
         AlertManager,
@@ -1516,7 +1518,7 @@ with tab_performance:
         牛市中 Buy 信號更可靠，熊市中 Sell 信號更可靠，震盪市場建議觀望。
         """)
         try:
-            from regime import get_current_regime
+            from src.regime import get_current_regime
             regime = get_current_regime()
             r1, r2, r3 = st.columns(3)
             regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}
@@ -1686,7 +1688,7 @@ with tab_performance:
 
         if perf_stock:
             # Calculate rolling accuracy using ModelDriftDetector
-            from model_monitoring import ModelDriftDetector
+            from src.model_monitoring import ModelDriftDetector
             drift_detector_perf = ModelDriftDetector(client)
 
             # Get accuracy data
@@ -1769,6 +1771,65 @@ with tab_performance:
                 st.info("尚無訓練指標數據。請先執行 `python src/train_model.py` 訓練模型。")
         else:
             st.info("尚無訓練指標數據。請先執行 `python src/train_model.py` 訓練模型。")
+
+    # Walk-forward backtest results
+    with st.expander("🔬 走動前推回測 (Walk-Forward)"):
+        st.info("""走動前推回測使用預設參數集成，在 purged 擴展窗口上訓練並向前預測。F1/AUC 為所有 purged 折的汇总表現。""")
+        wf_rows = []
+        for tf in ["1d", "5d", "20d"]:
+            csv_path = os.path.join(MODELS_DIR, f"walk_forward_{tf}.csv")
+            if not os.path.exists(csv_path):
+                continue
+            try:
+                wdf = pd.read_csv(csv_path)
+                if wdf.empty:
+                    continue
+                from sklearn.metrics import f1_score as _f1, roc_auc_score as _auc
+                y_true = wdf["target"].values
+                proba = wdf["proba"].values
+                f1_val = _f1(y_true, (proba > 0.5).astype(int), zero_division=0)
+                auc_val = _auc(y_true, proba) if len(set(y_true)) > 1 else 0.0
+                signal = np.where(proba > 0.55, 1, np.where(proba < 0.45, -1, 0))
+                wf_rows.append({
+                    "時間範圍": TIMEFRAME_LABELS.get(tf, tf),
+                    "樣本數": len(wdf),
+                    "F1": round(f1_val, 4),
+                    "AUC": round(auc_val, 4),
+                    "Buy比例": f"{(signal == 1).mean():.1%}",
+                    "Sell比例": f"{(signal == -1).mean():.1%}",
+                })
+            except Exception:
+                continue
+        if wf_rows:
+            st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info("尚無回測數據。請確保 USE_WALK_FORWARD=True 並執行訓練。")
+
+    # Confidence calibration
+    with st.expander("🎯 信心度校準 (Calibration)"):
+        st.info("""ECE (Expected Calibration Error) 越低越好 — 表示預測信心度越貼近實際命中率。< 0.05 良好, 0.05-0.15 尚可, > 0.15 需調整。""")
+        try:
+            from src.model_monitoring import ConfidenceCalibrator
+            calibrator = ConfidenceCalibrator(client)
+            cal_rows = []
+            for code in stock_codes_in_df:
+                cal = calibrator.calculate_calibration(code, timeframe=perf_tf, days=120)
+                if cal.get("calibration_score") is not None:
+                    cal_rows.append({
+                        "股票": code,
+                        "ECE": cal["calibration_score"],
+                        "平均信心度": cal.get("avg_confidence", "-"),
+                        "樣本數": cal.get("sample_size", 0),
+                    })
+            if cal_rows:
+                cal_df = pd.DataFrame(cal_rows)
+                cal_df["ECE"] = cal_df["ECE"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
+                cal_df["平均信心度"] = cal_df["平均信心度"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
+                st.dataframe(cal_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("尚無校準數據。需至少 20 筆已過期預測。")
+        except Exception as e:
+            st.warning(f"校準計算失敗: {e}")
 
 
 # --- Footer ---

@@ -2,10 +2,7 @@
 logs/
 cache/
 *.pkl
-models/*.pkl
-models/*.png
-models/*.csv
-models/*.json
+models/*
 __pycache__/
 *.pyc
 *.pyo

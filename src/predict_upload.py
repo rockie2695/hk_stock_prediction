@@ -10,13 +10,14 @@ import json
 import pickle
 from typing import Optional, Set
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 import pytz
 from supabase import create_client, Client
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY
+from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY, USE_DYNAMIC_WEIGHTING
 from src.data_fetcher import fetch_stock_data
 from src.feature_engineering import compute_features, compute_extended_features, FEATURE_COLUMNS
 from src.logger import setup_logger
@@ -271,7 +272,7 @@ def fetch_market_features() -> pd.DataFrame:
 
     # HSI index
     try:
-        hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False)
+        hsi = yf.download('^HSI', start=start_date, end=end_date, progress=False, auto_adjust=False)
         if not hsi.empty:
             if isinstance(hsi.columns, pd.MultiIndex):
                 hsi.columns = hsi.columns.get_level_values(0)
@@ -282,7 +283,7 @@ def fetch_market_features() -> pd.DataFrame:
 
     # USD/HKD
     try:
-        fx = yf.download('HKD=X', start=start_date, end=end_date, progress=False)
+        fx = yf.download('HKD=X', start=start_date, end=end_date, progress=False, auto_adjust=False)
         if not fx.empty:
             if isinstance(fx.columns, pd.MultiIndex):
                 fx.columns = fx.columns.get_level_values(0)
@@ -301,15 +302,74 @@ def fetch_market_features() -> pd.DataFrame:
         market_df.index = market_df.index.tz_localize(None).normalize()
 
     if 'hsi_close' in market_df.columns:
-        market_df['hsi_ret_5d'] = market_df['hsi_close'].pct_change(5)
-        market_df['hsi_ret_20d'] = market_df['hsi_close'].pct_change(20)
+        market_df['hsi_ret_5d'] = market_df['hsi_close'].pct_change(5, fill_method=None)
+        market_df['hsi_ret_20d'] = market_df['hsi_close'].pct_change(20, fill_method=None)
     if 'usdhkd' in market_df.columns:
-        market_df['usdhkd_change'] = market_df['usdhkd'].pct_change(5)
+        market_df['usdhkd_change'] = market_df['usdhkd'].pct_change(5, fill_method=None)
 
     market_df = market_df.drop(columns=['hsi_close', 'usdhkd'], errors='ignore')
 
     logger.info(f"  Market features: {list(market_df.columns)}")
     return market_df
+
+
+def _dynamic_ensemble_proba(model_data: dict, X: pd.DataFrame, stock_code: str, label: str,
+                            df: pd.DataFrame, valid: pd.DataFrame) -> float:
+    """
+    Compute ensemble probability using dynamically weighted sub-models.
+    使用動態加權子模型計算集成機率。
+
+    Updates per-model weights from recent price-verified accuracy (EMA), then
+    produces a weighted probability. Falls back to equal weights if insufficient data.
+    依近期價格驗證準確度更新各模型權重 (EMA)，再產出加權機率。
+    若數據不足則回退至等權重。
+
+    Args / 參數:
+        model_data: Current model dict / 當前模型字典
+        X: Feature row for prediction / 用於預測的特徵行
+        stock_code: Stock code / 股票代碼
+        label: Timeframe label ('1d', '5d', '20d') / 時間範圍標籤
+        df: Feature DataFrame (has Close for target) / 特徵 DataFrame (含 Close)
+        valid: Dropna-ed feature rows / 去空值的特徵行
+
+    Returns / 返回:
+        Class-1 (Buy) probability / 類別1 (買入) 機率
+    """
+    from src.dynamic_weighting import (
+        compute_dynamic_ensemble_prediction, update_model_weights, evaluate_model_performance
+    )
+    model = model_data['model']
+    if not hasattr(model, 'estimators_'):
+        return model.predict_proba(X)[0][1]
+
+    days = TIMEFRAMES[label]
+    # Build target for this timeframe and measure recent per-estimator accuracy
+    # 建立該時間範圍的目標並衡量各估計器近期準確度
+    accuracies = {}
+    try:
+        df_tmp = df.copy()
+        if 'target' not in df_tmp.columns:
+            df_tmp['target'] = (df_tmp['Close'].shift(-days) > df_tmp['Close']).astype(int)
+        valid_target = df_tmp.loc[valid.index, 'target'].dropna().tail(120)
+        if len(valid_target) >= 20:
+            model_features = model_data.get('feature_columns', list(valid.columns))
+            X_recent = valid.loc[valid_target.index, [c for c in model_features if c in valid.columns]]
+            for name, estimator in model.estimators_:
+                try:
+                    preds = estimator.predict(X_recent)
+                    acc = evaluate_model_performance(valid_target.values, preds)['accuracy']
+                    accuracies[name] = acc
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"  Dynamic weight accuracy update failed: {e} / 動態權重準確度更新失敗")
+
+    if accuracies:
+        update_model_weights(stock_code, label, accuracies)
+
+    # Weighted prediction (returns class-1 probabilities, one per row)
+    weighted = compute_dynamic_ensemble_prediction(model_data, X, stock_code, label)
+    return float(weighted[0])
 
 
 def predict_stock(stock_code: str, models: dict) -> list:
@@ -383,8 +443,12 @@ def predict_stock(stock_code: str, models: dict) -> list:
 
         # Predict with available features
         try:
-            proba = model.predict_proba(X)[0]
-            buy_prob = proba[1]
+            if USE_DYNAMIC_WEIGHTING and hasattr(model, 'estimators_'):
+                # Dynamically weighted ensemble prediction / 動態加權集成預測
+                buy_prob = _dynamic_ensemble_proba(model_data, X, stock_code, label, df, valid)
+            else:
+                proba = model.predict_proba(X)[0]
+                buy_prob = proba[1]
         except Exception as e:
             logger.error(f"  Prediction error for {stock_code} {label}: {e}")
             continue
@@ -563,6 +627,23 @@ def upload_to_supabase(records: list) -> tuple[int, int]:
         logger.error(f"Failed to connect to Supabase: {e}")
         return 0, len(records)
 
+    # Build lookup of existing (stock_code, prediction_date, timeframe) to update-instead-of-insert.
+    # Prevents duplicate rows when the job runs twice in one day (e.g. scheduler + manual rerun).
+    # 建立已存在 (stock_code, prediction_date, timeframe) 的查詢表，改為更新而非插入。
+    # 避免一天內執行兩次 (如排程器 + 手動) 造成重複資料。
+    existing_keys = set()
+    try:
+        dates = sorted({r['prediction_date'] for r in records})
+        if dates:
+            dup_res = client.table('stock_predictions').select(
+                'stock_code,prediction_date,timeframe'
+            ).in_('prediction_date', dates).execute()
+            for row in dup_res.data:
+                existing_keys.add((row['stock_code'], row['prediction_date'], row['timeframe']))
+            logger.info(f"  Found {len(existing_keys)} existing rows to update (dedup)")
+    except Exception as e:
+        logger.warning(f"  Could not check for duplicates: {e}")
+
     success_count = 0
     fail_count = 0
     for record in records:
@@ -589,8 +670,20 @@ def upload_to_supabase(records: list) -> tuple[int, int]:
                 'model_split': record.get('model_split', '0/0'),
             }
 
-            # Always insert new record (keep history)
-            client.table('stock_predictions').insert(upload_data).execute()
+            key = (record['stock_code'], record['prediction_date'], record['timeframe'])
+            if key in existing_keys:
+                # Update existing row instead of inserting a duplicate / 更新既有行而非插入重複
+                query = (client.table('stock_predictions')
+                         .update(upload_data)
+                         .eq('stock_code', record['stock_code'])
+                         .eq('prediction_date', record['prediction_date'])
+                         .eq('timeframe', record['timeframe']))
+                query.execute()
+                logger.info(f"  Updated (dedup): {record['stock_code']} {record['timeframe']}")
+            else:
+                # Always insert new record (keep history) / 插入新記錄 (保留歷史)
+                client.table('stock_predictions').insert(upload_data).execute()
+                existing_keys.add(key)
             success_count += 1
             logger.info(f"  Uploaded: {record['stock_code']} {record['timeframe']}")
         except Exception as e:
@@ -642,7 +735,14 @@ def predict_and_upload() -> None:
 
     success, fail = upload_to_supabase(all_records)
     logger.info(f"=== Daily Prediction Complete (uploaded {success}, failed {fail}) ===")
+    from src.notifier import notify_success
+    notify_success("每日預測 / Daily Prediction", f"Uploaded {success}, failed {fail} / 上傳 {success}，失敗 {fail}")
 
 
 if __name__ == '__main__':
-    predict_and_upload()
+    try:
+        predict_and_upload()
+    except Exception as e:
+        from src.notifier import notify_failure
+        notify_failure("預測 / Prediction", e)
+        raise
