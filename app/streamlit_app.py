@@ -91,6 +91,70 @@ def get_stock_ohlcv(stock_code: str, days: int = 90):
 
 
 @st.cache_data(ttl=300)
+def get_validation_summary(stocks: tuple):
+    """Fixed-scope aggregates for the 四項驗證綜合結論 panel.
+
+    Covers ALL stocks x ALL timeframes (1d/5d/20d) so the conclusion panel is
+    independent of the perf_stock / perf_tf selectboxes. Cached (ttl=300) on the
+    stock list only — changing those selections never recomputes or alters it.
+    """
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import ConfidenceCalibrator, ModelDriftDetector
+
+    empty = {
+        "roll_acc": None,
+        "roll_correct": 0,
+        "roll_total": 0,
+        "roll_combos": 0,
+        "roll_combos_total": 0,
+        "ece_mean": None,
+        "ece_combos": 0,
+        "ece_combos_total": 0,
+    }
+    client = get_supabase_client()
+    if client is None or not stocks:
+        return empty
+
+    tfs = ["1d", "5d", "20d"]
+    detector = ModelDriftDetector(client)
+    calibrator = ConfidenceCalibrator(client)
+    roll_correct = 0
+    roll_total = 0
+    roll_combos = 0
+    eces = []
+    for code in stocks:
+        for tf in tfs:
+            try:
+                acc = detector.calculate_accuracy(code, tf, days=30)
+                if acc.get("accuracy") is not None and acc.get("total", 0) > 0:
+                    roll_correct += acc["correct"]
+                    roll_total += acc["total"]
+                    roll_combos += 1
+            except Exception:
+                # one broken combo should not kill the whole panel
+                pass
+            try:
+                cal = calibrator.calculate_calibration(code, timeframe=tf, days=120)
+                if cal.get("calibration_score") is not None:
+                    eces.append(float(cal["calibration_score"]))
+            except Exception:
+                pass
+
+    combos_total = len(stocks) * len(tfs)
+    return {
+        "roll_acc": (roll_correct / roll_total * 100) if roll_total else None,
+        "roll_correct": roll_correct,
+        "roll_total": roll_total,
+        "roll_combos": roll_combos,
+        "roll_combos_total": combos_total,
+        "ece_mean": (sum(eces) / len(eces)) if eces else None,
+        "ece_combos": len(eces),
+        "ece_combos_total": combos_total,
+    }
+
+
+@st.cache_data(ttl=300)
 def get_latest_indicators(stock_code: str):
     """Compute latest technical indicators for a stock from OHLCV data."""
     if PROJECT_ROOT not in sys.path:
@@ -1712,6 +1776,7 @@ with tab_performance:
             key="perf_tf",
         )
 
+        accuracy_result = {}
         if perf_stock:
             # Calculate rolling accuracy using ModelDriftDetector
             from src.model_monitoring import ModelDriftDetector
@@ -1755,9 +1820,9 @@ with tab_performance:
         st.caption("指標定義請見上方「🧪 真實驗證指標說明」面板")
 
         # Get latest training metrics from predictions
+        metrics_data = []
         if not df.empty and "f1_score" in df.columns:
             # Group by stock_code and timeframe, get latest metrics
-            metrics_data = []
             for stock in stock_codes_in_df:
                 for tf in ["1d", "5d", "20d"]:
                     tf_label = TIMEFRAME_LABELS.get(tf, tf)
@@ -1828,10 +1893,11 @@ with tab_performance:
     # Confidence calibration
     with st.expander("🎯 信心度校準 (Calibration)"):
         st.caption("ECE 解讀請見上方「🧪 真實驗證指標說明」面板")
+        cal_rows = []
+        skipped_rows = []
         try:
             from src.model_monitoring import ConfidenceCalibrator
             calibrator = ConfidenceCalibrator(client)
-            cal_rows = []
             for code in stock_codes_in_df:
                 cal = calibrator.calculate_calibration(code, timeframe=perf_tf, days=120)
                 if cal.get("calibration_score") is not None:
@@ -1841,15 +1907,139 @@ with tab_performance:
                         "平均信心度": cal.get("avg_confidence", "-"),
                         "樣本數": cal.get("sample_size", 0),
                     })
+                else:
+                    skipped_rows.append({
+                        "股票": code,
+                        "狀態": "無法計算",
+                        "原因": cal.get("message") or cal.get("error") or "未知",
+                        "可驗證樣本": cal.get("sample_size", 0),
+                    })
             if cal_rows:
                 cal_df = pd.DataFrame(cal_rows)
                 cal_df["ECE"] = cal_df["ECE"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
                 cal_df["平均信心度"] = cal_df["平均信心度"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
                 st.dataframe(cal_df, use_container_width=True, hide_index=True)
             else:
-                st.info("尚無校準數據。需至少 20 筆已過期預測。")
+                st.info("尚無可計算的校準數據（無法計算的股票及原因見下方）。")
+            if skipped_rows:
+                st.caption(
+                    f"⚠️ {len(skipped_rows)}/{len(stock_codes_in_df)} 檔無法計算 ECE"
+                    "（門檻：≥20 筆預測，且 ≥10 筆已過期的 Buy/Sell 預測）："
+                )
+                st.dataframe(pd.DataFrame(skipped_rows), use_container_width=True, hide_index=True)
         except Exception as e:
             st.warning(f"校準計算失敗: {e}")
+
+    # --- Grouped conclusion: aggregate the four validation panels above ---
+    st.markdown("---")
+    st.subheader("📝 四項驗證綜合結論")
+    st.caption("彙總上方四個面板（滾動準確度 / 訓練指標 / 走動前推回測 / 信心度校準）的判讀結果；固定彙整全部股票 × 3 時間範圍，不隨股票/時間範圍選擇器變動")
+
+    def _verdict(v, kind):
+        """Return (emoji, label) for a metric value; None/NaN -> insufficient data."""
+        if v is None or not pd.notna(v):
+            return "➖", "數據不足"
+        if kind == "acc":  # rolling accuracy, percent
+            if v >= 55:
+                return "✅", "良好"
+            if v >= 50:
+                return "⚠️", "接近隨機"
+            return "❌", "低於隨機"
+        if kind == "f1":  # F1 score
+            if v > 0.6:
+                return "✅", "良好"
+            if v > 0.5:
+                return "⚠️", "可用"
+            return "❌", "偏弱"
+        if kind == "ece":  # expected calibration error, lower is better
+            if v < 0.05:
+                return "✅", "良好"
+            if v <= 0.15:
+                return "⚠️", "尚可"
+            return "❌", "需調整"
+        return "➖", "-"
+
+    def _mean(vals):
+        vals = [float(v) for v in vals if v is not None and pd.notna(v)]
+        return sum(vals) / len(vals) if vals else None
+
+    def _fmt(v, nd=4):
+        return f"{v:.{nd}f}" if v is not None and pd.notna(v) else "-"
+
+    # Fixed-scope aggregates (all stocks x 1d/5d/20d), cached on the stock list
+    # only — independent of the perf_stock / perf_tf selectboxes above.
+    _summary = get_validation_summary(tuple(stock_codes_in_df))
+    roll_acc = _summary["roll_acc"]
+    roll_scope = (
+        f"{len(stock_codes_in_df)} 檔 × 3 時間範圍"
+        f"（{_summary['roll_combos']}/{_summary['roll_combos_total']} 組合有數據）"
+    )
+    f1_mean = _mean([r.get("F1 Score") for r in metrics_data])
+    auc_mean = _mean([r.get("AUC Score") for r in metrics_data])
+    wf_f1 = _mean([r.get("F1") for r in wf_rows])
+    wf_auc = _mean([r.get("AUC") for r in wf_rows])
+    ece_mean = _summary["ece_mean"]
+    cal_coverage = f"{_summary['ece_combos']}/{_summary['ece_combos_total']} 組合"
+
+    v1 = _verdict(roll_acc, "acc")
+    v2 = _verdict(f1_mean, "f1")
+    v3 = _verdict(wf_f1, "f1")
+    v4 = _verdict(ece_mean, "ece")
+
+    st.dataframe(
+        pd.DataFrame([
+            {
+                "驗證項目": "📈 滾動準確度 (30天)",
+                "範圍": roll_scope,
+                "關鍵指標": f"{roll_acc:.1f}%" if roll_acc is not None else "-",
+                "判讀": f"{v1[0]} {v1[1]}",
+            },
+            {
+                "驗證項目": "📋 訓練指標 (F1/AUC)",
+                "範圍": f"{len(metrics_data)} 筆 (股票×時間範圍)",
+                "關鍵指標": f"F1 {_fmt(f1_mean)} / AUC {_fmt(auc_mean)}",
+                "判讀": f"{v2[0]} {v2[1]}",
+            },
+            {
+                "驗證項目": "🔬 走動前推回測",
+                "範圍": f"{len(wf_rows)} 個時間範圍",
+                "關鍵指標": f"F1 {_fmt(wf_f1)} / AUC {_fmt(wf_auc)}",
+                "判讀": f"{v3[0]} {v3[1]}",
+            },
+            {
+                "驗證項目": "🎯 信心度校準 (ECE)",
+                "範圍": f"覆蓋 {cal_coverage}",
+                "關鍵指標": f"ECE {_fmt(ece_mean)}",
+                "判讀": f"{v4[0]} {v4[1]}",
+            },
+        ]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    emojis = [v1[0], v2[0], v3[0], v4[0]]
+    n_good = emojis.count("✅")
+    n_warn = emojis.count("⚠️")
+    n_bad = emojis.count("❌")
+    n_na = emojis.count("➖")
+
+    if n_bad >= 2 or (n_bad == 1 and n_warn >= 1):
+        overall = "❌ 整體偏弱 — 多項驗證未達標，建議重新訓練或檢查特徵/數據"
+    elif n_bad == 1:
+        overall = "⚠️ 有一項驗證未達標 — 其餘尚可，可針對弱項改善"
+    elif n_warn >= 1:
+        overall = "⚠️ 整體可用但有進步空間 — 參考上表判讀"
+    elif n_na >= 1:
+        overall = "➖ 部分項目數據不足 — 待累積更多預測後再完整判讀"
+    else:
+        overall = "✅ 四項驗證全部良好 — 模型在真實驗證、訓練指標、回測與校準上均通過"
+
+    st.markdown(f"**整體判讀：** {overall}")
+    if _summary["ece_combos"] < _summary["ece_combos_total"]:
+        st.caption(
+            f"※ 信心度校準僅覆蓋 {cal_coverage}（其餘因可驗證 Buy/Sell 樣本不足未計入，"
+            "明細見上方校準面板）。"
+        )
 
 
 # --- Footer ---

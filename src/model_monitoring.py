@@ -206,7 +206,16 @@ class ModelDriftDetector:
             sell_total = sum(1 for o in outcomes if o['signal'] == 'Sell')
             sell_correct = sum(1 for o in outcomes if o['signal'] == 'Sell' and o['is_correct'])
 
-            accuracy = (correct / total * 100) if total > 0 else 0
+            if total == 0:
+                return {
+                    'accuracy': None,
+                    'correct': 0,
+                    'total': 0,
+                    'sample_size': len(pred_result.data),
+                    'message': '尚無已過期的 Buy/Sell 預測可驗證 (Hold 或時間範圍未到期者不計)',
+                }
+
+            accuracy = (correct / total * 100)
             signal_counts = {p['signal'] for p in pred_result.data}
 
             return {
@@ -516,7 +525,11 @@ class ConfidenceCalibrator:
                 'created_at', desc=True).limit(200).execute()
 
             if not result.data or len(result.data) < 20:
-                return {'calibration_score': None, 'message': '數據不足，無法計算校準指標'}
+                return {
+                    'calibration_score': None,
+                    'sample_size': len(result.data or []),
+                    'message': f'預測筆數不足 (需 ≥20 筆，目前 {len(result.data or [])} 筆)',
+                }
 
             # Fetch price data to verify outcomes / 取得價格數據以驗證結果
             try:
@@ -527,7 +540,11 @@ class ConfidenceCalibrator:
             tf_days = {'1d': 1, '5d': 5, '20d': 20}.get(timeframe, 5)
             outcomes = _verify_prediction_outcomes(result.data, price_df, tf_days)
             if len(outcomes) < 10:
-                return {'calibration_score': None, 'sample_size': len(outcomes), 'message': '可驗證樣本不足'}
+                return {
+                    'calibration_score': None,
+                    'sample_size': len(outcomes),
+                    'message': f'可驗證 Buy/Sell 樣本不足 (需 ≥10 筆，目前 {len(outcomes)} 筆；Hold 或時間範圍未到期者不計)',
+                }
 
             df = pd.DataFrame(outcomes).dropna(subset=['confidence'])
 

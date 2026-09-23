@@ -139,15 +139,28 @@ def get_current_regime() -> dict:
         
         if isinstance(hsi.columns, pd.MultiIndex):
             hsi.columns = hsi.columns.get_level_values(0)
-        
-        regime_df = detect_regime(hsi['Close'])
+
+        # yfinance can append incomplete rows (NaN Close); rolling MAs over
+        # those produce NaN trend — drop them before detection.
+        close = hsi['Close'].dropna()
+        if close.empty:
+            return {'regime': 'sideways', 'confidence': 0.5, 'trend': 0.0}
+
+        regime_df = detect_regime(close)
         latest = regime_df.iloc[-1]
-        
+
         regime_names = {0: 'bear', 1: 'sideways', 2: 'bull'}
+        trend = float(latest['hsi_trend_50_200'])
+        if not np.isfinite(trend):
+            # e.g. <200 rows of history so MA200 never forms
+            trend = 0.0
+        confidence = float(latest['regime_confidence'])
+        if not np.isfinite(confidence):
+            confidence = 0.5
         return {
             'regime': regime_names.get(int(latest['market_regime']), 'sideways'),
-            'confidence': float(latest['regime_confidence']),
-            'trend': float(latest['hsi_trend_50_200']),
+            'confidence': confidence,
+            'trend': trend,
         }
     except Exception as e:
         logger.warning(f"Failed to get regime: {e} / 無法取得市場狀態")
