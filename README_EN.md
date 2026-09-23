@@ -217,6 +217,51 @@ Set up Windows Task Scheduler to auto-execute daily at 16:30 (after HK market cl
 
 > **Note:** HK market trading hours are 9:30-16:00 HKT. Schedule at 16:30 to ensure closing data is fully loaded. Weekends and public holidays are non-trading days — the system auto-skips them.
 
+## Output Files After Running run_daily.bat
+
+`run_daily.bat` runs 3 steps in order: `train_model.py` (train) → `cleanup_old.py` (purge records older than 60 days) → `predict_upload.py` (predict & upload to Supabase). Below are the files produced/updated after a run (`{tf}` = each of the three timeframes `1d` / `5d` / `20d`):
+
+### Model Files (`models/`)
+
+| File | Description |
+|---|---|
+| `models/best_model_{tf}.pkl` | **Currently used model** (3 files: `best_model_1d.pkl`, `best_model_5d.pkl`, `best_model_20d.pkl`) — loaded at prediction time |
+| `models/best_model_{tf}_{timestamp}.pkl` | Versioned backup (e.g. `best_model_5d_20260922_224621.pkl`); keeps the latest 5 versions per timeframe for rollback |
+| `models/feature_importance_{tf}.csv` | Feature importance ranking (CSV, open in Excel) |
+| `models/dynamic_weights.json` | Dynamic ensemble weights (only updated when `USE_DYNAMIC_WEIGHTING=True`) |
+
+### Chart Images (`models/`)
+
+| File | Description |
+|---|---|
+| `models/roc_curve_{tf}.png` | ROC curve chart (validation-set F1/AUC visualization) |
+| `models/walk_forward_{tf}.png` | Walk-forward backtest performance chart (only when `USE_WALK_FORWARD=True`) |
+| `models/trees/tree_{tf}_{model}.png` | Sub-model visualization: RF = actual tree structure; XGB / LGB / CB = feature-importance bar charts (ensemble mode only) |
+
+### Backtest Data (`models/`)
+
+| File | Description |
+|---|---|
+| `models/walk_forward_{tf}.csv` | Walk-forward per-row results (`index` / `proba` / `target`) — read by the dashboard's "🔬 Walk-Forward" panel |
+
+### Logs (`logs/`)
+
+| File | Description |
+|---|---|
+| `logs/run_log.txt` | Batch-file run log (start/end time, per-step status) |
+| `logs/app.log` | Python module log (training metrics, warnings, errors) |
+
+### Other Outputs
+
+| Location | Description |
+|---|---|
+| Supabase `stock_predictions` table | Today's predictions (signal, confidence, F1/AUC, stop-loss/take-profit, etc.) uploaded to the cloud database |
+| `cache/hk_holidays.json` | HK market holiday cache (refreshed from the official 1823.gov.hk API) |
+| `catboost_info/` | CatBoost training scratch files (safe to ignore) |
+| Telegram (optional) | Success/failure notification when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are set |
+
+> **Note:** Step 1 (training) takes ~3-8 minutes; steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. Runs on Saturday/Sunday are skipped entirely with no output.
+
 ## Docker Deployment
 
 ### Build Image

@@ -1662,17 +1662,43 @@ with tab_performance:
     st.subheader("📊 模型表現追蹤")
     st.caption("追蹤模型預測的真實準確度，而非僅看訓練指標")
 
-    # Rolling accuracy section
-    with st.expander("📈 滾動準確度 (Rolling Accuracy)", expanded=True):
+    # Consolidated real-world validation explanation panel (single place for all
+    # validation-metric explanations; sub-expanders below only show data)
+    with st.expander("🧪 真實驗證指標說明 (Real-World Validation)"):
         st.info("""
-        **計算方式：**
+        本區所有指標都以「真實結果」驗證模型，而非只看訓練時的分數：
+
+        **📈 滾動準確度 (Rolling Accuracy)**
         對每個預測，驗證 N 天後的實際價格是否朝預測方向移動：
         - Buy 信號 → N天後收盤價 > 預測日收盤價 = 正確
         - Sell 信號 → N天後收盤價 < 預測日收盤價 = 正確
         - Hold 信號 → 不計入
 
         **滾動 30 天準確度** = 最近 30 天內正確預測數 / 總預測數 × 100%
+
+        ---
+
+        **📋 訓練指標 (F1 / AUC)**
+        以下指標為模型訓練時計算的 F1 Score 和 AUC Score，為靜態指標，每次重新訓練後更新。
+        - **F1 Score**: 精準率與召回率的調和平均數 (>0.5 可用, >0.6 良好)
+        - **AUC Score**: 模型區分漲跌的能力 (0.5=隨機, >0.6 可用, >0.7 良好)
+
+        ---
+
+        **🔬 走動前推回測 (Walk-Forward)**
+        走動前推回測使用預設參數集成，在 purged 擴展窗口上訓練並向前預測。
+        F1/AUC 為所有 purged 折的汇总表現。
+
+        ---
+
+        **🎯 信心度校準 (Calibration)**
+        ECE (Expected Calibration Error) 越低越好 — 表示預測信心度越貼近實際命中率。
+        < 0.05 良好, 0.05-0.15 尚可, > 0.15 需調整。
         """)
+
+    # Rolling accuracy section
+    with st.expander("📈 滾動準確度 (Rolling Accuracy)", expanded=True):
+        st.caption("計算方式請見上方「🧪 真實驗證指標說明」面板")
 
         perf_stock = st.selectbox(
             "選擇股票",
@@ -1726,13 +1752,7 @@ with tab_performance:
 
     # Training metrics (static F1/AUC from DB)
     with st.expander("📋 訓練指標 (F1 / AUC)"):
-        st.info("""
-        **說明：** 以下指標為模型訓練時計算的 F1 Score 和 AUC Score。
-        這些是靜態指標，每次重新訓練後更新。
-
-        - **F1 Score**: 精準率與召回率的調和平均數 (>0.5 可用, >0.6 良好)
-        - **AUC Score**: 模型區分漲跌的能力 (0.5=隨機, >0.6 可用, >0.7 良好)
-        """)
+        st.caption("指標定義請見上方「🧪 真實驗證指標說明」面板")
 
         # Get latest training metrics from predictions
         if not df.empty and "f1_score" in df.columns:
@@ -1774,7 +1794,7 @@ with tab_performance:
 
     # Walk-forward backtest results
     with st.expander("🔬 走動前推回測 (Walk-Forward)"):
-        st.info("""走動前推回測使用預設參數集成，在 purged 擴展窗口上訓練並向前預測。F1/AUC 為所有 purged 折的汇总表現。""")
+        st.caption("回測原理請見上方「🧪 真實驗證指標說明」面板")
         wf_rows = []
         for tf in ["1d", "5d", "20d"]:
             csv_path = os.path.join(MODELS_DIR, f"walk_forward_{tf}.csv")
@@ -1807,7 +1827,7 @@ with tab_performance:
 
     # Confidence calibration
     with st.expander("🎯 信心度校準 (Calibration)"):
-        st.info("""ECE (Expected Calibration Error) 越低越好 — 表示預測信心度越貼近實際命中率。< 0.05 良好, 0.05-0.15 尚可, > 0.15 需調整。""")
+        st.caption("ECE 解讀請見上方「🧪 真實驗證指標說明」面板")
         try:
             from src.model_monitoring import ConfidenceCalibrator
             calibrator = ConfidenceCalibrator(client)

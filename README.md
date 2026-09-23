@@ -215,6 +215,51 @@ python -m pytest tests/ -v --tb=short
 
 > **Note:** 港股市場交易時間為 9:30-16:00 HKT。建議排程設定在 16:30，確保收盤數據已完全載入。週六、日及公眾假期為休市日，系統會自動跳過。
 
+## 執行 run_daily.bat 後的輸出檔案
+
+`run_daily.bat` 依序執行 3 個步驟：`train_model.py`（訓練）→ `cleanup_old.py`（清理 60 天前舊記錄）→ `predict_upload.py`（預測並上傳 Supabase）。以下為完成後會產生／更新的檔案（`{tf}` = `1d` / `5d` / `20d` 三個時間範圍）：
+
+### 模型檔案 (`models/`)
+
+| 檔案 | 說明 |
+|---|---|
+| `models/best_model_{tf}.pkl` | **當前使用的模型**（3 個：`best_model_1d.pkl`、`best_model_5d.pkl`、`best_model_20d.pkl`），預測時載入此檔 |
+| `models/best_model_{tf}_{時間戳}.pkl` | 版本化備份（如 `best_model_5d_20260922_224621.pkl`），每個時間範圍自動保留最近 5 版，可用於回滾 |
+| `models/feature_importance_{tf}.csv` | 特徵重要性排名（CSV，可用 Excel 開啟） |
+| `models/dynamic_weights.json` | 動態集成權重（僅 `USE_DYNAMIC_WEIGHTING=True` 時更新） |
+
+### 圖表影像 (`models/`)
+
+| 檔案 | 說明 |
+|---|---|
+| `models/roc_curve_{tf}.png` | ROC 曲線圖（驗證集 F1/AUC 視覺化） |
+| `models/walk_forward_{tf}.png` | 走動前推回測表現圖（僅 `USE_WALK_FORWARD=True` 時產生） |
+| `models/trees/tree_{tf}_{model}.png` | 子模型可視化：RF = 實際樹結構；XGB / LGB / CB = 特徵重要性長條圖（僅集成模式時產生） |
+
+### 回測數據 (`models/`)
+
+| 檔案 | 說明 |
+|---|---|
+| `models/walk_forward_{tf}.csv` | 走動前推回測逐筆結果（`index` / `proba` / `target`），儀表板「🔬 走動前推回測」讀取此檔 |
+
+### 日誌 (`logs/`)
+
+| 檔案 | 說明 |
+|---|---|
+| `logs/run_log.txt` | 批次檔執行記錄（開始/結束時間、各步驟狀態） |
+| `logs/app.log` | Python 模組日誌（訓練指標、警告、錯誤） |
+
+### 其他輸出
+
+| 位置 | 說明 |
+|---|---|
+| Supabase `stock_predictions` 表 | 當日預測結果（signal、confidence、F1/AUC、止損止盈等欄位）上傳至雲端資料庫 |
+| `cache/hk_holidays.json` | 港股休市日快取（由 1823.gov.hk 官方 API 更新） |
+| `catboost_info/` | CatBoost 訓練過程暫存檔（可忽略） |
+| Telegram（可選） | 設定 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 後，成功/失敗會發送通知 |
+
+> **Note:** 步驟 1（訓練）約 3-8 分鐘；步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日執行時會直接跳過，不產生任何輸出。
+
 ## Docker 部署
 
 ### 建立鏡像
