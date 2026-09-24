@@ -32,6 +32,36 @@ st.set_page_config(
 st.title("💰 投資模擬器")
 st.caption("根據預測信號模擬投資，計算實際收益與風險")
 
+
+@st.cache_data(ttl=300)
+def get_accuracy_matrix(stocks: tuple):
+    """60-day accuracy for stocks × timeframes (Supabase), cached 5 min.
+
+    Returns the display rows for the accuracy table. Exceptions propagate
+    to the caller so the page keeps its original warning behaviour.
+    """
+    from supabase import create_client
+    from src.model_monitoring import ModelDriftDetector
+
+    client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    detector = ModelDriftDetector(client)
+    rows = []
+    for code in stocks:
+        for tf, tf_label in [("1d", "1天"), ("5d", "5天"), ("20d", "20天")]:
+            acc_result = detector.calculate_accuracy(code, tf, days=60)
+            if acc_result.get('accuracy') is not None and acc_result.get('total', 0) > 0:
+                rows.append({
+                    "股票代碼": code,
+                    "時間範圍": tf_label,
+                    "準確度": f"{acc_result['accuracy']:.1f}%",
+                    "正確/總數": f"{acc_result['correct']}/{acc_result['total']}",
+                    "Buy 準確度": f"{acc_result['buy_accuracy']:.1f}%" if acc_result.get('buy_accuracy') is not None else "-",
+                    "Sell 準確度": f"{acc_result['sell_accuracy']:.1f}%" if acc_result.get('sell_accuracy') is not None else "-",
+                    "Buy 信號數": acc_result.get('buy_signals', 0),
+                    "Sell 信號數": acc_result.get('sell_signals', 0),
+                })
+    return rows
+
 # --- Sidebar Controls ---
 st.sidebar.header("⚙️ 模擬設定")
 
@@ -566,29 +596,8 @@ if 'sim_results' in st.session_state and st.session_state['sim_results']:
     st.subheader("🎯 預測準確度分析")
     st.caption("驗證歷史預測是否正確：Buy 信號後價格是否上漲？Sell 信號後價格是否下跌？")
 
-    from src.model_monitoring import ModelDriftDetector
-    from supabase import create_client
-
     try:
-        client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        drift_detector = ModelDriftDetector(client)
-
-        accuracy_data = []
-        for code in selected_stocks:
-            for tf, tf_label in [("1d", "1天"), ("5d", "5天"), ("20d", "20天")]:
-                acc_result = drift_detector.calculate_accuracy(code, tf, days=60)
-                if acc_result.get('accuracy') is not None and acc_result.get('total', 0) > 0:
-                    accuracy_data.append({
-                        "股票代碼": code,
-                        "時間範圍": tf_label,
-                        "準確度": f"{acc_result['accuracy']:.1f}%",
-                        "正確/總數": f"{acc_result['correct']}/{acc_result['total']}",
-                        "Buy 準確度": f"{acc_result['buy_accuracy']:.1f}%" if acc_result.get('buy_accuracy') is not None else "-",
-                        "Sell 準確度": f"{acc_result['sell_accuracy']:.1f}%" if acc_result.get('sell_accuracy') is not None else "-",
-                        "Buy 信號數": acc_result.get('buy_signals', 0),
-                        "Sell 信號數": acc_result.get('sell_signals', 0),
-                    })
-
+        accuracy_data = get_accuracy_matrix(tuple(selected_stocks))
         if accuracy_data:
             acc_df = pd.DataFrame(accuracy_data)
             st.dataframe(acc_df, use_container_width=True, hide_index=True)

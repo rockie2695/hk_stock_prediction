@@ -25,8 +25,9 @@ HK_TZ = pytz.timezone("Asia/Hong_Kong")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+@st.cache_data(ttl=300)
 def get_current_signals(stock_codes):
-    """Get latest predictions from Supabase / 從 Supabase 獲取最新預測"""
+    """Get latest predictions from Supabase / 從 Supabase 獲取最新預測 (cached 5 min)"""
     try:
         from supabase import create_client
         from config import SUPABASE_URL, SUPABASE_KEY
@@ -51,7 +52,7 @@ def render_portfolio_page():
     st.caption("Current holdings, P&L, and risk exposure / 當前持倉、盈虧和風險暴露")
     
     from config import STOCK_LIST
-    predictions_df = get_current_signals(STOCK_LIST)
+    predictions_df = get_current_signals(tuple(STOCK_LIST))
     
     if predictions_df.empty:
         st.info("No prediction data available / 暫無預測數據")

@@ -26,8 +26,9 @@ HK_TZ = pytz.timezone("Asia/Hong_Kong")
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+@st.cache_data(ttl=300)
 def get_predictions(stock_code, start_date, end_date, timeframe="5d"):
-    """Fetch predictions from Supabase / 從 Supabase 獲取預測數據"""
+    """Fetch predictions from Supabase / 從 Supabase 獲取預測數據 (cached 5 min)"""
     try:
         from supabase import create_client
         from config import SUPABASE_URL, SUPABASE_KEY

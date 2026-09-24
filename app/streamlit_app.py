@@ -192,6 +192,123 @@ def get_latest_indicators(stock_code: str):
         return None
 
 
+@st.cache_data(ttl=300)
+def get_regime_data():
+    """Current market regime (yfinance), cached 5 min — avoids refetching 2y of HSI data every rerun."""
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.regime import get_current_regime
+    return get_current_regime()
+
+
+@st.cache_data(ttl=300)
+def get_quality_checks(stocks: tuple):
+    """Data-quality checks (Supabase), cached 5 min."""
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import DataQualityChecker
+    client = get_supabase_client()
+    if client is None:
+        return []
+    return DataQualityChecker(client).run_all_checks(list(stocks))
+
+
+@st.cache_data(ttl=300)
+def get_drift_results(stocks: tuple):
+    """Model-drift results (Supabase + price verify), cached 5 min."""
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import ModelDriftDetector
+    client = get_supabase_client()
+    if client is None:
+        return []
+    return ModelDriftDetector(client).check_all_models(list(stocks))
+
+
+@st.cache_data(ttl=300)
+def get_signal_alerts_html(stocks: tuple):
+    """Formatted signal-alert markdown (Supabase), cached 5 min. '' = no alerts."""
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import AlertManager
+    client = get_supabase_client()
+    if client is None:
+        return ""
+    mgr = AlertManager(client)
+    alerts = mgr.check_alerts(list(stocks))
+    return mgr.format_alerts(alerts) if alerts else ""
+
+
+@st.cache_data(ttl=300)
+def get_confidence_calibration(stocks: tuple):
+    """Per-stock avg-confidence calibration rows (Supabase), cached 5 min."""
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import ConfidenceCalibrator
+    client = get_supabase_client()
+    if client is None:
+        return []
+    calibrator = ConfidenceCalibrator(client)
+    rows = []
+    for code in stocks:
+        calibration = calibrator.calculate_calibration(code)
+        if calibration.get("avg_confidence") is not None:
+            adjustment = calibrator.suggest_calibration_adjustment(calibration)
+            rows.append({
+                "stock_code": code,
+                "avg_confidence": calibration["avg_confidence"],
+                "std_confidence": calibration.get("std_confidence", 0),
+                "sample_size": calibration.get("sample_size", 0),
+                "message": adjustment["message"],
+            })
+    return rows
+
+
+@st.cache_data(ttl=300)
+def get_rolling_accuracy(stock: str, tf: str):
+    """30-day rolling accuracy for one stock × timeframe (Supabase + price verify), cached 5 min."""
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import ModelDriftDetector
+    client = get_supabase_client()
+    if client is None:
+        return {}
+    return ModelDriftDetector(client).calculate_accuracy(stock, tf, days=30)
+
+
+@st.cache_data(ttl=300)
+def get_tf_calibration(stocks: tuple, tf: str):
+    """ECE calibration rows for stocks × one timeframe (Supabase), cached 5 min.
+
+    Returns (cal_rows, skipped_rows) matching the panel's display shape.
+    """
+    if PROJECT_ROOT not in sys.path:
+        sys.path.insert(0, PROJECT_ROOT)
+    from src.model_monitoring import ConfidenceCalibrator
+    client = get_supabase_client()
+    if client is None:
+        return [], []
+    calibrator = ConfidenceCalibrator(client)
+    cal_rows, skipped_rows = [], []
+    for code in stocks:
+        cal = calibrator.calculate_calibration(code, timeframe=tf, days=120)
+        if cal.get("calibration_score") is not None:
+            cal_rows.append({
+                "股票": code,
+                "ECE": cal["calibration_score"],
+                "平均信心度": cal.get("avg_confidence", "-"),
+                "樣本數": cal.get("sample_size", 0),
+            })
+        else:
+            skipped_rows.append({
+                "股票": code,
+                "狀態": "無法計算",
+                "原因": cal.get("message") or cal.get("error") or "未知",
+                "可驗證樣本": cal.get("sample_size", 0),
+            })
+    return cal_rows, skipped_rows
+
+
 def get_indicator_alignment(indicators: dict, signal: str) -> list:
     """Analyze how current indicators align with a Buy/Sell/Hold signal.
     
@@ -394,7 +511,7 @@ with col_start:
     )
 with col_end:
     end_date = st.date_input(
-        "結束日期", value=(datetime.now() + timedelta(days=31)).date()
+        "結束日期", value=(datetime.now() + timedelta(days=45)).date()
     )
 
 # Clear cache to force fresh data on date change
@@ -533,9 +650,7 @@ with tab_signals:
 
                 # --- Market Regime Display ---
                 try:
-                    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-                    from src.regime import get_current_regime
-                    regime_data = get_current_regime()
+                    regime_data = get_regime_data()
                     regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}
                     regime_name = {"bull": "牛市", "bear": "熊市", "sideways": "震盪"}
                     r = regime_data
@@ -811,7 +926,7 @@ with tab_kline:
     # --- K-Line Chart with Buy/Sell Signals ---
     st.markdown("---")
     st.subheader("🕯️ K線圖 (含買賣信號)")
-    st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置，支持MA均線 (MA5/10/20)")
+    st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置，支持MA均線 (MA5/10/20)；空心K線為最新預測（開=最新收盤，收=預期報酬，影線=止損/止盈）")
 
     # Stock selector for K-line chart
     stock_codes_in_df = sorted(df["stock_code"].unique())
@@ -847,6 +962,21 @@ with tab_kline:
     with col_ma20:
         show_ma20 = st.checkbox("MA20", value=True, key="chk_ma20")
 
+    def _future_trading_day(start, n):
+        """Step n business days after `start`, skipping weekends and HK holidays."""
+        try:
+            from src.predict_upload import fetch_hk_holidays_online
+            hk_holidays = fetch_hk_holidays_online()
+        except Exception:
+            hk_holidays = set()  # fallback: weekends only
+        d = pd.Timestamp(start).date()
+        count = 0
+        while count < n:
+            d += timedelta(days=1)
+            if d.weekday() < 5 and d.isoformat() not in hk_holidays:
+                count += 1
+        return pd.Timestamp(d)
+
     if selected_kline_stock:
         ohlcv_df = get_stock_ohlcv(selected_kline_stock, days=kline_period)
 
@@ -862,13 +992,13 @@ with tab_kline:
             if show_ma20:
                 ohlcv_df["MA20"] = ohlcv_df["Close"].rolling(window=20).mean()
 
-            # Get predictions for this stock within the OHLCV date range
+            # Get predictions for this stock. Lower bound = visible window start;
+            # NO upper bound — latest signals (1d target = today) and pending
+            # 5d/20d targets fall beyond the last candle and must stay included.
             min_date = ohlcv_df["Date"].min().date()
-            max_date = ohlcv_df["Date"].max().date()
             stock_preds = df[
                 (df["stock_code"] == selected_kline_stock)
                 & (df["prediction_date"] >= min_date)
-                & (df["prediction_date"] <= max_date)
             ].copy()
 
             # Filter by timeframe if selected
@@ -951,13 +1081,16 @@ with tab_kline:
                     buy_tf = tf_preds[tf_preds["signal"] == "Buy"]
                     if not buy_tf.empty:
                         buy_dates = pd.to_datetime(buy_tf["prediction_date"])
+                        last_low = ohlcv_df.iloc[-1]["Low"]
                         buy_y = []
                         for d in buy_dates:
                             match = ohlcv_df[ohlcv_df["Date"] == d]
                             if not match.empty:
                                 buy_y.append(match.iloc[0]["Low"] * 0.98)
                             else:
-                                buy_y.append(None)
+                                # Pending/latest signal: target date has no candle
+                                # yet (future target or data lag) — anchor to last candle.
+                                buy_y.append(last_low * 0.98)
                         buy_tf = buy_tf.copy()
                         buy_tf["_plot_y"] = buy_y
                         buy_tf = buy_tf.dropna(subset=["_plot_y"])
@@ -987,13 +1120,15 @@ with tab_kline:
                     sell_tf = tf_preds[tf_preds["signal"] == "Sell"]
                     if not sell_tf.empty:
                         sell_dates = pd.to_datetime(sell_tf["prediction_date"])
+                        last_high = ohlcv_df.iloc[-1]["High"]
                         sell_y = []
                         for d in sell_dates:
                             match = ohlcv_df[ohlcv_df["Date"] == d]
                             if not match.empty:
                                 sell_y.append(match.iloc[0]["High"] * 1.02)
                             else:
-                                sell_y.append(None)
+                                # Pending/latest signal: no candle at target yet.
+                                sell_y.append(last_high * 1.02)
                         sell_tf = sell_tf.copy()
                         sell_tf["_plot_y"] = sell_y
                         sell_tf = sell_tf.dropna(subset=["_plot_y"])
@@ -1018,6 +1153,103 @@ with tab_kline:
                                 ),
                                 row=1, col=1,
                             )
+
+            # 🔮 Hollow future prediction bars (latest per timeframe).
+            # Open = last real close; close = open × (1 + expected_return%);
+            # wicks to stop_loss / take_profit levels (all fields are percentages).
+            horizon_days = {"1d": 1, "5d": 5, "20d": 20}
+            horizon_labels = {"1d": "明日", "5d": "下週", "20d": "下月"}
+            signal_colors = {"Buy": "#2ecc71", "Sell": "#e74c3c", "Hold": "#95a5a6"}
+            tfs_to_show = ["1d", "5d", "20d"] if kline_tf == "all" else [kline_tf]
+            last_close = float(ohlcv_df.iloc[-1]["Close"])
+
+            for htf in tfs_to_show:
+                try:
+                    tf_preds_h = stock_preds[stock_preds["timeframe"] == htf]
+                    if tf_preds_h.empty:
+                        continue
+                    latest_pred = tf_preds_h.sort_values("prediction_date").iloc[-1]
+
+                    open_px = last_close
+                    er = latest_pred.get("expected_return")
+                    close_px = (
+                        open_px * (1 + float(er) / 100)
+                        if er is not None and pd.notna(er)
+                        else open_px
+                    )
+                    levels = [open_px, close_px]
+                    sl = latest_pred.get("stop_loss")
+                    tp = latest_pred.get("take_profit")
+                    if sl is not None and pd.notna(sl):
+                        levels.append(open_px * (1 + float(sl) / 100))
+                    if tp is not None and pd.notna(tp):
+                        levels.append(open_px * (1 + float(tp) / 100))
+                    high_px = max(levels)
+                    low_px = min(levels)
+
+                    signal_val = latest_pred.get("signal")
+                    if not isinstance(signal_val, str):
+                        signal_val = "Hold"
+                    color = signal_colors.get(signal_val, "#95a5a6")
+                    hlabel = horizon_labels.get(htf, htf)
+                    # Place the hollow bar at the prediction's own target date
+                    # (DB value, holiday-aware); fall back to computed horizon.
+                    pred_target = latest_pred.get("prediction_date")
+                    if pred_target is not None and pd.notna(pred_target):
+                        horizon_x = pd.Timestamp(pred_target)
+                    else:
+                        horizon_x = _future_trading_day(
+                            ohlcv_df["Date"].max(), horizon_days[htf]
+                        )
+
+                    conf = latest_pred.get("confidence")
+                    conf_str = f"{float(conf):.1%}" if conf is not None and pd.notna(conf) else "-"
+                    er_str = f"{float(er):+.2f}%" if er is not None and pd.notna(er) else "—"
+                    sl_str = f"{float(sl):+.2f}%" if sl is not None and pd.notna(sl) else "—"
+                    tp_str = f"{float(tp):+.2f}%" if tp is not None and pd.notna(tp) else "—"
+
+                    hover_txt = (
+                        f"🔮 {hlabel}預測<br>信號: {signal_val}"
+                        f"<br>信心: {conf_str}"
+                        f"<br>預期報酬: {er_str}"
+                        f"<br>止損: {sl_str} / 止盈: {tp_str}"
+                        f"<br>預測日: {latest_pred['prediction_date']}"
+                        f"<br>到期日: {horizon_x.date()}"
+                    )
+                    # plotly 5.x Candlestick rejects `width`/`hovertemplate`, and a
+                    # single-point candle autosizes to ~2px — so draw the hollow bar
+                    # as a Bar body (width in ms) plus a high→low wick line instead.
+                    fig_kline.add_trace(
+                        go.Bar(
+                            x=[horizon_x],
+                            y=[close_px - open_px],
+                            base=[open_px],
+                            width=86400000 * 0.7,
+                            name=f"🔮 預測 ({hlabel})",
+                            legendgroup=f"pred_{htf}",
+                            marker=dict(
+                                color="rgba(0,0,0,0)",
+                                line=dict(color=color, width=2),
+                            ),
+                            hovertext=hover_txt,
+                            hoverinfo="text",
+                        ),
+                        row=1, col=1,
+                    )
+                    fig_kline.add_trace(
+                        go.Scatter(
+                            x=[horizon_x, horizon_x],
+                            y=[high_px, low_px],
+                            mode="lines",
+                            line=dict(color=color, width=2),
+                            legendgroup=f"pred_{htf}",
+                            showlegend=False,
+                            hoverinfo="skip",
+                        ),
+                        row=1, col=1,
+                    )
+                except Exception:
+                    continue  # skip broken bar; keep chart rendering
 
             fig_kline.update_layout(
                 height=600,
@@ -1551,22 +1783,7 @@ with tab_performance:
     st.subheader("🔍 模型監控")
     st.caption("自動監控模型性能、數據品質和信號品質，確保預測可靠性")
 
-    # Import monitoring functions
-    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
-    from src.model_monitoring import (
-        DataQualityChecker,
-        ModelDriftDetector,
-        AlertManager,
-        ConfidenceCalibrator,
-    )
-
-    # Initialize monitoring
-    checker = DataQualityChecker(client)
-    drift_detector = ModelDriftDetector(client)
-    alert_manager = AlertManager(client)
-    calibrator = ConfidenceCalibrator(client)
-
-    # Get stock codes from config
+    # Get stock codes from config (monitoring data fetched via cached helpers below)
     STOCK_LIST = os.getenv("STOCK_LIST", "0700,9988,0005,0939").split(",")
 
     # Market Regime Overview
@@ -1582,8 +1799,7 @@ with tab_performance:
         牛市中 Buy 信號更可靠，熊市中 Sell 信號更可靠，震盪市場建議觀望。
         """)
         try:
-            from src.regime import get_current_regime
-            regime = get_current_regime()
+            regime = get_regime_data()
             r1, r2, r3 = st.columns(3)
             regime_emoji = {"bull": "🟢", "bear": "🔴", "sideways": "🟡"}
             regime_name = {"bull": "牛市", "bear": "熊市", "sideways": "震盪"}
@@ -1612,7 +1828,7 @@ with tab_performance:
         - 計算信心度分佈，檢測極端值比例
         - 分析信號分佈，確保各信號比例合理
         """)
-        quality_results = checker.run_all_checks(STOCK_LIST)
+        quality_results = get_quality_checks(tuple(STOCK_LIST))
         for result in quality_results:
             # Check both missing_dates and confidence_dist status
             missing_ok = result["missing_dates"]["status"] == "ok"
@@ -1649,7 +1865,7 @@ with tab_performance:
         漂移值 = 最近7天平均信心度 - 最近30天平均信心度
         ```
         """)
-        drift_results = drift_detector.check_all_models(STOCK_LIST)
+        drift_results = get_drift_results(tuple(STOCK_LIST))
         for result in drift_results:
             if result.get("drift"):
                 severity = "🔴" if result.get("severity") == "high" else "🟡"
@@ -1674,9 +1890,9 @@ with tab_performance:
 
         **注意：** 信號僅供參考，請結合其他分析判斷
         """)
-        alerts = alert_manager.check_alerts(STOCK_LIST)
-        if alerts:
-            st.markdown(alert_manager.format_alerts(alerts))
+        alerts_html = get_signal_alerts_html(tuple(STOCK_LIST))
+        if alerts_html:
+            st.markdown(alerts_html)
         else:
             st.info("目前沒有需要關注的信號。")
 
@@ -1696,21 +1912,7 @@ with tab_performance:
         - 計算標準差 (信心度穩定性)
         - 根據平均值判斷是否需要調整
         """)
-        calibration_data = []
-        for code in STOCK_LIST:
-            calibration = calibrator.calculate_calibration(code)
-            if calibration.get("avg_confidence") is not None:
-                adjustment = calibrator.suggest_calibration_adjustment(calibration)
-                calibration_data.append(
-                    {
-                        "stock_code": code,
-                        "avg_confidence": calibration["avg_confidence"],
-                        "std_confidence": calibration.get("std_confidence", 0),
-                        "sample_size": calibration.get("sample_size", 0),
-                        "message": adjustment["message"],
-                    }
-                )
-
+        calibration_data = get_confidence_calibration(tuple(STOCK_LIST))
         if calibration_data:
             for data in calibration_data:
                 st.write(
@@ -1778,14 +1980,8 @@ with tab_performance:
 
         accuracy_result = {}
         if perf_stock:
-            # Calculate rolling accuracy using ModelDriftDetector
-            from src.model_monitoring import ModelDriftDetector
-            drift_detector_perf = ModelDriftDetector(client)
-
-            # Get accuracy data
-            accuracy_result = drift_detector_perf.calculate_accuracy(
-                perf_stock, perf_tf, days=30
-            )
+            # Rolling accuracy (cached 5 min per stock × timeframe)
+            accuracy_result = get_rolling_accuracy(perf_stock, perf_tf)
 
             if accuracy_result.get("accuracy") is not None:
                 acc = accuracy_result["accuracy"]
@@ -1896,24 +2092,9 @@ with tab_performance:
         cal_rows = []
         skipped_rows = []
         try:
-            from src.model_monitoring import ConfidenceCalibrator
-            calibrator = ConfidenceCalibrator(client)
-            for code in stock_codes_in_df:
-                cal = calibrator.calculate_calibration(code, timeframe=perf_tf, days=120)
-                if cal.get("calibration_score") is not None:
-                    cal_rows.append({
-                        "股票": code,
-                        "ECE": cal["calibration_score"],
-                        "平均信心度": cal.get("avg_confidence", "-"),
-                        "樣本數": cal.get("sample_size", 0),
-                    })
-                else:
-                    skipped_rows.append({
-                        "股票": code,
-                        "狀態": "無法計算",
-                        "原因": cal.get("message") or cal.get("error") or "未知",
-                        "可驗證樣本": cal.get("sample_size", 0),
-                    })
+            cal_rows, skipped_rows = get_tf_calibration(
+                tuple(stock_codes_in_df), perf_tf
+            )
             if cal_rows:
                 cal_df = pd.DataFrame(cal_rows)
                 cal_df["ECE"] = cal_df["ECE"].apply(lambda x: f"{x:.4f}" if pd.notna(x) else "-")
