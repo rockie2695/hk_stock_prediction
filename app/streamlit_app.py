@@ -926,7 +926,7 @@ with tab_kline:
     # --- K-Line Chart with Buy/Sell Signals ---
     st.markdown("---")
     st.subheader("🕯️ K線圖 (含買賣信號)")
-    st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置，支持MA均線 (MA5/10/20)；空心K線為最新預測（開=最新收盤，收=預期報酬，影線=止損/止盈）")
+    st.caption("互動式K線圖，標示模型預測的買入/賣出信號位置，支持MA均線 (MA5/10/20)；未到期的未來信號以最新收盤價標示於 y 軸")
 
     # Stock selector for K-line chart
     stock_codes_in_df = sorted(df["stock_code"].unique())
@@ -961,21 +961,6 @@ with tab_kline:
         show_ma10 = st.checkbox("MA10", value=True, key="chk_ma10")
     with col_ma20:
         show_ma20 = st.checkbox("MA20", value=True, key="chk_ma20")
-
-    def _future_trading_day(start, n):
-        """Step n business days after `start`, skipping weekends and HK holidays."""
-        try:
-            from src.predict_upload import fetch_hk_holidays_online
-            hk_holidays = fetch_hk_holidays_online()
-        except Exception:
-            hk_holidays = set()  # fallback: weekends only
-        d = pd.Timestamp(start).date()
-        count = 0
-        while count < n:
-            d += timedelta(days=1)
-            if d.weekday() < 5 and d.isoformat() not in hk_holidays:
-                count += 1
-        return pd.Timestamp(d)
 
     if selected_kline_stock:
         ohlcv_df = get_stock_ohlcv(selected_kline_stock, days=kline_period)
@@ -1070,6 +1055,9 @@ with tab_kline:
                     "20d": ("diamond", 14),
                 }
                 tf_labels = {"1d": "明日", "5d": "下週", "20d": "下月"}
+                # Latest K-line close — pending/future signals (target date has
+                # no candle yet) are anchored at this price on the y-axis.
+                last_close = float(ohlcv_df.iloc[-1]["Close"])
 
                 for tf_key, (symbol, size) in tf_markers.items():
                     tf_label = tf_labels.get(tf_key, tf_key)
@@ -1081,16 +1069,15 @@ with tab_kline:
                     buy_tf = tf_preds[tf_preds["signal"] == "Buy"]
                     if not buy_tf.empty:
                         buy_dates = pd.to_datetime(buy_tf["prediction_date"])
-                        last_low = ohlcv_df.iloc[-1]["Low"]
                         buy_y = []
                         for d in buy_dates:
                             match = ohlcv_df[ohlcv_df["Date"] == d]
                             if not match.empty:
                                 buy_y.append(match.iloc[0]["Low"] * 0.98)
                             else:
-                                # Pending/latest signal: target date has no candle
-                                # yet (future target or data lag) — anchor to last candle.
-                                buy_y.append(last_low * 0.98)
+                                # Pending/future signal: no candle at target yet —
+                                # anchor at the latest close price (y-axis).
+                                buy_y.append(last_close)
                         buy_tf = buy_tf.copy()
                         buy_tf["_plot_y"] = buy_y
                         buy_tf = buy_tf.dropna(subset=["_plot_y"])
@@ -1120,15 +1107,15 @@ with tab_kline:
                     sell_tf = tf_preds[tf_preds["signal"] == "Sell"]
                     if not sell_tf.empty:
                         sell_dates = pd.to_datetime(sell_tf["prediction_date"])
-                        last_high = ohlcv_df.iloc[-1]["High"]
                         sell_y = []
                         for d in sell_dates:
                             match = ohlcv_df[ohlcv_df["Date"] == d]
                             if not match.empty:
                                 sell_y.append(match.iloc[0]["High"] * 1.02)
                             else:
-                                # Pending/latest signal: no candle at target yet.
-                                sell_y.append(last_high * 1.02)
+                                # Pending/future signal: no candle at target yet —
+                                # anchor at the latest close price (y-axis).
+                                sell_y.append(last_close)
                         sell_tf = sell_tf.copy()
                         sell_tf["_plot_y"] = sell_y
                         sell_tf = sell_tf.dropna(subset=["_plot_y"])
@@ -1153,103 +1140,6 @@ with tab_kline:
                                 ),
                                 row=1, col=1,
                             )
-
-            # 🔮 Hollow future prediction bars (latest per timeframe).
-            # Open = last real close; close = open × (1 + expected_return%);
-            # wicks to stop_loss / take_profit levels (all fields are percentages).
-            horizon_days = {"1d": 1, "5d": 5, "20d": 20}
-            horizon_labels = {"1d": "明日", "5d": "下週", "20d": "下月"}
-            signal_colors = {"Buy": "#2ecc71", "Sell": "#e74c3c", "Hold": "#95a5a6"}
-            tfs_to_show = ["1d", "5d", "20d"] if kline_tf == "all" else [kline_tf]
-            last_close = float(ohlcv_df.iloc[-1]["Close"])
-
-            for htf in tfs_to_show:
-                try:
-                    tf_preds_h = stock_preds[stock_preds["timeframe"] == htf]
-                    if tf_preds_h.empty:
-                        continue
-                    latest_pred = tf_preds_h.sort_values("prediction_date").iloc[-1]
-
-                    open_px = last_close
-                    er = latest_pred.get("expected_return")
-                    close_px = (
-                        open_px * (1 + float(er) / 100)
-                        if er is not None and pd.notna(er)
-                        else open_px
-                    )
-                    levels = [open_px, close_px]
-                    sl = latest_pred.get("stop_loss")
-                    tp = latest_pred.get("take_profit")
-                    if sl is not None and pd.notna(sl):
-                        levels.append(open_px * (1 + float(sl) / 100))
-                    if tp is not None and pd.notna(tp):
-                        levels.append(open_px * (1 + float(tp) / 100))
-                    high_px = max(levels)
-                    low_px = min(levels)
-
-                    signal_val = latest_pred.get("signal")
-                    if not isinstance(signal_val, str):
-                        signal_val = "Hold"
-                    color = signal_colors.get(signal_val, "#95a5a6")
-                    hlabel = horizon_labels.get(htf, htf)
-                    # Place the hollow bar at the prediction's own target date
-                    # (DB value, holiday-aware); fall back to computed horizon.
-                    pred_target = latest_pred.get("prediction_date")
-                    if pred_target is not None and pd.notna(pred_target):
-                        horizon_x = pd.Timestamp(pred_target)
-                    else:
-                        horizon_x = _future_trading_day(
-                            ohlcv_df["Date"].max(), horizon_days[htf]
-                        )
-
-                    conf = latest_pred.get("confidence")
-                    conf_str = f"{float(conf):.1%}" if conf is not None and pd.notna(conf) else "-"
-                    er_str = f"{float(er):+.2f}%" if er is not None and pd.notna(er) else "—"
-                    sl_str = f"{float(sl):+.2f}%" if sl is not None and pd.notna(sl) else "—"
-                    tp_str = f"{float(tp):+.2f}%" if tp is not None and pd.notna(tp) else "—"
-
-                    hover_txt = (
-                        f"🔮 {hlabel}預測<br>信號: {signal_val}"
-                        f"<br>信心: {conf_str}"
-                        f"<br>預期報酬: {er_str}"
-                        f"<br>止損: {sl_str} / 止盈: {tp_str}"
-                        f"<br>預測日: {latest_pred['prediction_date']}"
-                        f"<br>到期日: {horizon_x.date()}"
-                    )
-                    # plotly 5.x Candlestick rejects `width`/`hovertemplate`, and a
-                    # single-point candle autosizes to ~2px — so draw the hollow bar
-                    # as a Bar body (width in ms) plus a high→low wick line instead.
-                    fig_kline.add_trace(
-                        go.Bar(
-                            x=[horizon_x],
-                            y=[close_px - open_px],
-                            base=[open_px],
-                            width=86400000 * 0.7,
-                            name=f"🔮 預測 ({hlabel})",
-                            legendgroup=f"pred_{htf}",
-                            marker=dict(
-                                color="rgba(0,0,0,0)",
-                                line=dict(color=color, width=2),
-                            ),
-                            hovertext=hover_txt,
-                            hoverinfo="text",
-                        ),
-                        row=1, col=1,
-                    )
-                    fig_kline.add_trace(
-                        go.Scatter(
-                            x=[horizon_x, horizon_x],
-                            y=[high_px, low_px],
-                            mode="lines",
-                            line=dict(color=color, width=2),
-                            legendgroup=f"pred_{htf}",
-                            showlegend=False,
-                            hoverinfo="skip",
-                        ),
-                        row=1, col=1,
-                    )
-                except Exception:
-                    continue  # skip broken bar; keep chart rendering
 
             fig_kline.update_layout(
                 height=600,

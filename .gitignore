@@ -16,3 +16,4 @@ build/
 .devcontainer/
 .pytest_cache/
 catboost_info/
+.playwright/
