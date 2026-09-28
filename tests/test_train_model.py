@@ -293,14 +293,34 @@ class TestPurgeAndClassWeights:
         with patch.object(tm, 'USE_CLASS_WEIGHTS', True):
             assert tm._scale_pos_weight(y) == 3.0
 
-    def test_build_default_voting(self, sample_training_data):
-        """_build_default_voting returns a VotingClassifier with predict_proba."""
+    def test_build_default_ensemble(self, sample_training_data):
+        """_build_default_ensemble returns an ensemble exposing predict_proba."""
         import src.train_model as tm
         X, y = sample_training_data
-        model = tm._build_default_voting(X, y)
+        model = tm._build_default_ensemble(X, y)
         assert hasattr(model, 'predict_proba')
         proba = model.predict_proba(X[:10])
         assert proba.shape == (10, 2)
+
+    def test_build_default_ensemble_honors_stacking(self, sample_training_data):
+        """Walk-forward ensemble must match the deployed mode, not always vote.
+
+        Regression: the backtest previously hardcoded VotingClassifier, so a stacked
+        model was validated against a model class it was never trained as.
+        回測先前硬編碼 VotingClassifier，導致 stacking 模型以未曾訓練的類別被驗證。
+        """
+        from sklearn.ensemble import StackingClassifier, VotingClassifier
+        import src.train_model as tm
+        X, y = sample_training_data
+
+        with patch.object(tm, 'USE_STACKING', True):
+            stacked = tm._build_default_ensemble(X, y)
+        assert isinstance(stacked, StackingClassifier)
+        assert hasattr(stacked, 'final_estimator_')
+
+        with patch.object(tm, 'USE_STACKING', False):
+            voted = tm._build_default_ensemble(X, y)
+        assert isinstance(voted, VotingClassifier)
 
     def test_walk_forward_backtest(self, sample_training_data, tmp_path):
         """_walk_forward_backtest returns stats dict and saves CSV."""

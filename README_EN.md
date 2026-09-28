@@ -23,7 +23,7 @@ Local Windows scheduled training (parallel) → Upload predictions to Supabase (
 - **SMOTE Class Balancing**: Automatically handles positive/negative class imbalance
 - **33 Technical Indicators**: Includes momentum, volatility, Williams %R, MFI, etc.
 - **15 Extended Features**: Sentiment analysis, sector rotation, short selling, connect flow, market regime detection
-- **Feature Correlation Filter**: Auto-removes redundant features with |corr| > 0.9
+- **Feature Correlation Filter**: Auto-removes redundant features with |corr| > 0.95
 - **Threshold Optimization**: Auto-searches optimal Buy/Sell confidence thresholds (replaces fixed 0.55/0.45)
 - **Model Versioning**: Timestamped model backups, keeps latest 5 versions, supports rollback
 - **Model Metrics Tracking**: Records F1 Score, AUC Score, champion model type
@@ -186,7 +186,7 @@ python -m pytest tests/ -v --tb=short
 |---|---|---|
 | `test_config.py` | 10 | Env vars, stock list parsing, Supabase config |
 | `test_feature_engineering.py` | 17 | RSI, MACD, Bollinger, ATR, ADX, Stochastic, MFI, Williams %R |
-| `test_train_model.py` | 22 | XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Purge/Embargo CV, Class-weight, Walk-forward |
+| `test_train_model.py` | 23 | XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Stacking, Purge/Embargo CV, Class-weight, Walk-forward |
 | `test_predict.py` | 13 | Prediction dates, model loading, signal determination, upload, same-day dedup, dynamic ensemble proba |
 | `test_sentiment.py` | 6 | News sentiment feature computation (incl. real-data validation) |
 | `test_sector.py` | 4 | Sector rotation feature computation |
@@ -199,7 +199,7 @@ python -m pytest tests/ -v --tb=short
 | `test_notifier.py` | 7 | Telegram notifications (incl. truncation, enable/disable) |
 | `test_backtest.py` | 2 | Backtest page |
 | `test_portfolio.py` | 2 | Portfolio page |
-| **Total** | **115** | |
+| **Total** | **116** | |
 
 ## Windows Task Scheduler Setup
 
@@ -260,7 +260,7 @@ Set up Windows Task Scheduler to auto-execute daily at 16:30 (after HK market cl
 | `catboost_info/` | CatBoost training scratch files (safe to ignore) |
 | Telegram (optional) | Success/failure notification when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are set |
 
-> **Note:** Step 1 (training) takes ~3-8 minutes; steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. Runs on Saturday/Sunday are skipped entirely with no output.
+> **Note:** Step 1 (training) takes ~5-15 min in Voting mode and considerably longer in Stacking/Blending (see "How long does training take?"); steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. Runs on Saturday/Sunday are skipped entirely with no output.
 
 ## Docker Deployment
 
@@ -382,14 +382,15 @@ project_root/
 ### Machine Learning Models
 - **Algorithms**: XGBoost + LightGBM + RandomForest + CatBoost ensemble
 - **Ensemble Methods**: VotingClassifier (soft voting) or StackingClassifier (meta-model = LogisticRegression) or Blending (out-of-fold)
-- **Hyperparameter Optimization**: Optuna (50 trials, simultaneously searching 4 models + voting weights)
-- **Weight Optimization**: Optuna auto-searches optimal weight combination (e.g. [0.3, 0.3, 0.2, 0.2]), not fixed 1:1:1:1
-- **Cross-Validation**: TimeSeriesSplit (n_splits=5), strictly follows time order, no future data leakage
+- **Hyperparameter Optimization**: Optuna (50 trials, simultaneously searching 4 models; voting weights are only searched in Voting mode)
+- **Weight Optimization**: In Voting mode, Optuna auto-searches the optimal weight combination (e.g. [0.3, 0.3, 0.2, 0.2]), not fixed 1:1:1:1. Stacking and Blending learn the combination themselves, so no weight parameters are searched
+- **Cross-Validation**: TimeSeriesSplit (n_splits=5) + Purge/Embargo, strictly follows time order, no future data leakage
 - **Class Imbalance Handling**: SMOTE (applied only on training folds, never across validation folds)
 - **Training Data**: 3 years of historical data (~750 trading days)
+- **Walk-Forward Backtest**: Runs after training on purged expanding windows. Uses default hyperparameters (no Optuna) for speed, but resolves the **same ensemble mode as the deployed model** (Blending > Stacking > Voting) and applies the **optimized Buy/Sell thresholds**, so the reported backtest reflects what actually ships
 - **Evaluation Metrics**: F1 Score, AUC, Precision, Recall
 - **ROC Curve**: Auto-saved to `models/roc_curve_{timeframe}.png`
-- **Feature Correlation Filter**: Auto-removes redundant features with |corr| > 0.9
+- **Feature Correlation Filter**: Auto-removes redundant features with |corr| > 0.955
 - **Threshold Optimization**: Auto-searches optimal Buy/Sell confidence thresholds (replaces fixed 0.55/0.45)
 - **Model Versioning**: Timestamped backups, auto-keeps latest 5 versions
 - **Feature Importance**: Output to `models/feature_importance_{timeframe}.csv`
@@ -450,12 +451,20 @@ project_root/
 | `USE_SMOTE` | `True` | Enable SMOTE class imbalance handling |
 | `USE_CLASS_WEIGHTS` | `True` | Class-imbalance weights (usually no-op when SMOTE=True) |
 | `USE_GPU` | `False` | CatBoost GPU training (requires NVIDIA GPU, uses more memory) |
-| `USE_WALK_FORWARD` | `True` | Purged walk-forward backtest after training |
+| `USE_WALK_FORWARD` | `True` | Purged walk-forward backtest after training (same ensemble mode as the deployed model) |
 
 **Priority Rules：**
-- `USE_STACKING=True` or `USE_BLENDING=True` → Forces ensemble mode
-- `USE_ENSEMBLE=True` (default) → VotingClassifier (weighted average)
-- `USE_ENSEMBLE=False` → Single best model (XGBoost vs LightGBM vs CatBoost)
+Mode is resolved in this order — the **first** match wins, so these flags are **not** independent:
+
+1. `USE_BLENDING=True` → Blending (out-of-fold)
+2. `USE_STACKING=True` → StackingClassifier (meta-model learns the combination)
+3. `USE_ENSEMBLE=True` (default) → VotingClassifier (weighted average)
+4. `USE_ENSEMBLE=False` → Single best model (XGBoost vs LightGBM vs CatBoost)
+
+- `USE_STACKING=True` or `USE_BLENDING=True` **forces ensemble mode**, even if `USE_ENSEMBLE=False`
+- Consequently, `USE_ENSEMBLE=True` produces a VotingClassifier **only** when `USE_STACKING` and `USE_BLENDING` are both `False`. With `USE_STACKING=True` the saved `model_type` is `stacking`
+- `USE_BLENDING=True` takes precedence over `USE_STACKING=True` if both are set
+- `USE_SMOTE`, `USE_CATBOOST`, `USE_CLASS_WEIGHTS`, `USE_GPU` and `USE_WALK_FORWARD` apply to every mode above
 
 **Training Speed：**
 - Timeframes (1d, 5d, 20d) **trained in parallel**, ~3x speedup
@@ -691,13 +700,13 @@ A: Edit `STOCK_LIST` in `.env`, e.g. `STOCK_LIST=0700,9988,0005,0939,1810`
 A: Logs are at `logs/app.log`
 
 ### Q: How long does training take?
-A: About 3-5 minutes (parallel training across timeframes). If using Stacking or Blending, about 5-8 minutes.
+A: Depends on the ensemble mode, because Stacking and Blending refit the base models internally. Budget roughly **5-15 min** for Voting, **15-40 min** for Stacking, and **30-60+ min** for Blending, with `USE_WALK_FORWARD=True` adding a further 5-fold pass per timeframe. The 3 timeframes train in parallel, so the wall-clock cost is set by the slowest one. Treat these as orders of magnitude on typical hardware, not guarantees — check `logs/app.log` for actual timings.
 
 ### Q: How long does prediction take?
 A: Parallel prediction across multiple stocks, about 5-10 seconds (depends on stock count).
 
 ### Q: What is Feature Correlation Filter?
-A: Auto-removes redundant features with |corr| > 0.9 before training. E.g., `ret_3d` is highly correlated with `ret_1d`/`ret_5d` — only the most informative is kept. Reduces noise, speeds up training, lowers overfitting.
+A: Auto-removes redundant features with |corr| > 0.95 before training. E.g., `ret_3d` is highly correlated with `ret_1d`/`ret_5d` — only the most informative is kept. Reduces noise, speeds up training, lowers overfitting.
 
 ### Q: What is Threshold Optimization?
 A: Typical systems use fixed thresholds (Buy > 55%, Sell < 45%), but optimal thresholds differ per timeframe. The system auto-searches for Buy/Sell thresholds that maximize F1 on validation, saves them after training.
@@ -791,10 +800,10 @@ A: Rolling accuracy = correct predictions in last 30 days / total predictions ×
 A: Run tests with pytest: `python -m pytest tests/ -v`. Tests cover env config, feature engineering, model training, prediction upload core functionality.
 
 ### Q: What features are covered by tests?
-A: 115 tests covering:
+A: 116 tests covering:
 - Env var loading & validation (10)
 - Technical indicator calculation: RSI, MACD, ATR, ADX, Stochastic, MFI, Williams %R (17)
-- Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Purge/Embargo CV, Walk-forward (22)
+- Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Stacking, Purge/Embargo CV, Walk-forward (23)
 - Prediction: date calculation, model loading, signal determination, upload, same-day dedup, dynamic ensemble proba (13)
 - Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (34)
 - Model monitoring: prediction validation, confidence calibration ECE (8)

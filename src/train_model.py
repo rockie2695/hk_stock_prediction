@@ -32,6 +32,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
+from typing import Optional
 warnings.filterwarnings('ignore')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -580,11 +581,16 @@ def objective_ensemble(trial, X, y, tscv, days: int = None):
             cb_kwargs['auto_class_weights'] = 'Balanced'
         cb_model = cb.CatBoostClassifier(**cb_params, **cb_kwargs)
 
-    # Tune voting weights
-    w1 = trial.suggest_float('w_xgb', 0.1, 2.0)
-    w2 = trial.suggest_float('w_lgb', 0.1, 2.0)
-    w3 = trial.suggest_float('w_rf', 0.1, 2.0)
-    w4 = trial.suggest_float('w_cb', 0.1, 2.0) if USE_CATBOOST and HAS_CATBOOST else 1.0
+    # Voting weights are consumed only by soft voting. Stacking and Blending learn the
+    # combination themselves, so suggesting w_* there spends the search budget on
+    # parameters that provably cannot change the objective.
+    # 投票權重僅 soft voting 使用；Stacking/Blending 自行學習組合，搜尋權重只會浪費預算。
+    use_voting = not (USE_BLENDING or USE_STACKING)
+
+    w1 = trial.suggest_float('w_xgb', 0.1, 2.0) if use_voting else None
+    w2 = trial.suggest_float('w_lgb', 0.1, 2.0) if use_voting else None
+    w3 = trial.suggest_float('w_rf', 0.1, 2.0) if use_voting else None
+    w4 = trial.suggest_float('w_cb', 0.1, 2.0) if (use_voting and USE_CATBOOST and HAS_CATBOOST) else None
 
     estimator_list = _get_estimator_list(xgb_model, lgb_model, rf_model, cb_model)
     
@@ -621,7 +627,7 @@ def objective_ensemble(trial, X, y, tscv, days: int = None):
     return np.mean(scores)
 
 
-def _create_blending_ensemble(estimators, tscv, days: int = None):
+def _create_blending_ensemble(estimators, tscv, days: Optional[int] = None):
     """Create a blending ensemble using out-of-fold predictions.
     
     days: Target horizon for purge/embargo on OOF folds (None = no purge)
@@ -932,7 +938,9 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
     # 走動前推回測 (訓練時，誠實的樣本外估計)
     if USE_WALK_FORWARD:
         logger.info("Running walk-forward backtest... / 執行走動前推回測...")
-        _walk_forward_backtest(data, available_features, days, timeframe_label)
+        _walk_forward_backtest(data, available_features, days, timeframe_label,
+                               threshold_buy=best_thresh_buy,
+                               threshold_sell=best_thresh_sell)
 
     return model_path, model_type, best_f1, best_auc
 
@@ -1135,9 +1143,17 @@ def _train_timeframe_worker(args):
         return None
 
 
-def _build_default_voting(X_train, y_train):
-    """Build a lightweight voting ensemble with default hyperparameters (no Optuna).
-    使用預設超參數建立輕量投票集成 (無 Optuna)。Used for fast walk-forward backtest.
+def _build_default_ensemble(X_train, y_train, tscv=None, days: Optional[int] = None):
+    """Build a lightweight ensemble with default hyperparameters (no Optuna).
+    使用預設超參數建立輕量集成 (無 Optuna)。Used for fast walk-forward backtest.
+
+    Resolves the mode exactly like train_single_timeframe (Blending > Stacking > Voting)
+    so the backtest measures the model class that actually gets deployed.
+    與 train_single_timeframe 相同的模式解析，確保回測衡量的是實際部署的模型類別。
+
+    Args / 參數:
+        tscv: Cross-validator for Blending's OOF folds. None -> TimeSeriesSplit(5).
+        days: Target horizon for purge/embargo (None = no purge) / purge 用的目標天數
     """
     scale_pos_weight = _scale_pos_weight(y_train)
     ests = []
@@ -1160,17 +1176,35 @@ def _build_default_voting(X_train, y_train):
         if USE_CLASS_WEIGHTS:
             cb_kwargs['auto_class_weights'] = 'Balanced'
         ests.append(('cb', cb.CatBoostClassifier(**cb_kwargs)))
-    model = VotingClassifier(estimators=ests, voting='soft', weights=[1.0] * len(ests))
+    if USE_BLENDING:
+        if tscv is None:
+            tscv = TimeSeriesSplit(n_splits=5)
+        model = _create_blending_ensemble(ests, tscv, days=days)
+    elif USE_STACKING:
+        model = StackingClassifier(
+            estimators=ests,
+            final_estimator=LogisticRegression(random_state=42),
+            cv=3, passthrough=False)
+    else:
+        model = VotingClassifier(estimators=ests, voting='soft', weights=[1.0] * len(ests))
+
     model.fit(X_train, y_train)
     return model
 
 
-def _walk_forward_backtest(data, available_features, days, timeframe_label):
+def _walk_forward_backtest(data, available_features, days, timeframe_label,
+                           threshold_buy=0.55, threshold_sell=0.45):
     """Walk-forward backtest: train on expanding purged windows, predict forward, simulate.
     走動前推回測：在擴展 purge 視窗上訓練，向前預測並模擬。
 
-    Uses default-parameter ensembles (no Optuna) for speed. Saves a CSV + plot.
-    使用預設參數集成 (無 Optuna) 以加快速度。儲存 CSV 與圖表。
+    Uses default-parameter ensembles (no Optuna) for speed, but resolves the same
+    ensemble mode as the deployed model (Blending > Stacking > Voting).
+    使用預設參數集成 (無 Optuna) 以加快速度，但與部署模型使用相同的集成模式解析。
+
+    Args / 參數:
+        threshold_buy / threshold_sell: Optimized signal thresholds from the final fit,
+            so the backtest applies the same rule the predictor uses.
+            最終擬合所最佳化的信號閾值，讓回測套用與預測相同的規則。
 
     Returns / 返回:
         Dict of metrics, or None on failure.
@@ -1186,7 +1220,7 @@ def _walk_forward_backtest(data, available_features, days, timeframe_label):
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train = y.iloc[train_idx]
             X_train_sm, y_train_sm = _apply_smote(X_train, y_train)
-            model = _build_default_voting(X_train_sm, y_train_sm)
+            model = _build_default_ensemble(X_train_sm, y_train_sm, tscv, days)
             proba = model.predict_proba(X_val)[:, 1]
             for gi, p in zip(val_idx, proba):
                 results.append((int(gi), float(p)))
@@ -1203,7 +1237,7 @@ def _walk_forward_backtest(data, available_features, days, timeframe_label):
             close = data['Close'].reset_index(drop=True)
             fwd = close.shift(-days) / close - 1
             ret_fwd = fwd.iloc[gidxs].values
-            signal = np.where(all_proba > 0.55, 1, np.where(all_proba < 0.45, -1, 0))
+            signal = np.where(all_proba > threshold_buy, 1, np.where(all_proba < threshold_sell, -1, 0))
             strat_ret = np.mean(ret_fwd[signal == 1]) if (signal == 1).any() else 0.0
             hold_ret = np.mean(ret_fwd) if len(ret_fwd) else 0.0
             stats['strategy_return'] = round(float(strat_ret), 6)
@@ -1227,8 +1261,8 @@ def _walk_forward_backtest(data, available_features, days, timeframe_label):
         try:
             plt.figure(figsize=(10, 5))
             plt.plot(np.arange(len(all_proba)), all_proba, 'b-', label='P(Buy)', linewidth=0.8)
-            plt.axhline(0.55, color='g', linestyle='--', label='Buy threshold')
-            plt.axhline(0.45, color='r', linestyle='--', label='Sell threshold')
+            plt.axhline(threshold_buy, color='g', linestyle='--', label='Buy threshold')
+            plt.axhline(threshold_sell, color='r', linestyle='--', label='Sell threshold')
             plt.title(f'Walk-Forward Backtest - {timeframe_label} (AUC={stats["auc"]})')
             plt.xlabel('Validation sample (time-ordered)')
             plt.ylabel('Probability')

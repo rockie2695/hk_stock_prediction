@@ -23,7 +23,7 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **SMOTE 類別平衡**: 自動處理正負樣本不平衡問題
 - **33項技術指標**: 新增動量、波動率、威廉指標、MFI 等
 - **15項擴展特徵**: 情緒分析、板塊輪動、沽空比率、互聯互通資金流、市場狀態偵測
-- **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵
+- **特徵相關性過濾**: 自動移除 |corr| > 0.95 的冗餘特徵
 - **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45)
 - **模型版本化**: 帶時間戳的模型備份，自動保留最近 5 版，支持回滾
 - **模型指標追蹤**: 記錄 F1 Score、AUC Score、冠軍模型類型
@@ -184,7 +184,7 @@ python -m pytest tests/ -v --tb=short
 |---|---|---|
 | `test_config.py` | 10 | 環境變數、股票列表解析、Supabase 設定 |
 | `test_feature_engineering.py` | 17 | RSI、MACD、Bollinger、ATR、ADX、Stochastic、MFI、Williams %R |
-| `test_train_model.py` | 22 | XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Purge/Embargo CV、Class-weight 開關、Walk-forward 回測 |
+| `test_train_model.py` | 23 | XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Stacking、Purge/Embargo CV、Class-weight 開關、Walk-forward 回測 |
 | `test_predict.py` | 13 | 預測日期、模型載入、信號判定、上傳功能、同日去重 (dedup)、動態集成機率 |
 | `test_sentiment.py` | 6 | 新聞情緒特徵計算 (含真實數據驗證) |
 | `test_sector.py` | 4 | 板塊輪動特徵計算 |
@@ -197,7 +197,7 @@ python -m pytest tests/ -v --tb=short
 | `test_notifier.py` | 7 | Telegram 通知 (含截斷、啟用/停用) |
 | `test_backtest.py` | 2 | 回測頁面 |
 | `test_portfolio.py` | 2 | 投資組合頁面 |
-| **總計** | **115** | |
+| **總計** | **116** | |
 
 ## 設定 Windows 自動排程
 
@@ -258,7 +258,7 @@ python -m pytest tests/ -v --tb=short
 | `catboost_info/` | CatBoost 訓練過程暫存檔（可忽略） |
 | Telegram（可選） | 設定 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 後，成功/失敗會發送通知 |
 
-> **Note:** 步驟 1（訓練）約 3-8 分鐘；步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日執行時會直接跳過，不產生任何輸出。
+> **Note:** 步驟 1（訓練）在 Voting 模式約 5-15 分鐘，Stacking / Blending 模式會明顯更久（詳見「訓練要多久？」）；步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日執行時會直接跳過，不產生任何輸出。
 
 ## Docker 部署
 
@@ -381,15 +381,15 @@ project_root/
 ### 機器學習模型
 - **演算法**: XGBoost + LightGBM + RandomForest + CatBoost 集成
 - **集成方式**: VotingClassifier (soft voting) 或 StackingClassifier (元模型 = LogisticRegression) 或 Blending (out-of-fold)
-- **超參數優化**: Optuna (50 trials，同時搜尋四個模型 + voting 權重)
-- **權重優化**: Optuna 自動搜尋最佳權重組合 (如 [0.3, 0.3, 0.2, 0.2])，非固定 1:1:1:1
+- **超參數優化**: Optuna (50 trials，同時搜尋四個模型；voting 權重僅在 Voting 模式下搜尋)
+- **權重優化**: Voting 模式下由 Optuna 自動搜尋最佳權重組合 (如 [0.3, 0.3, 0.2, 0.2])，非固定 1:1:1:1。Stacking 與 Blending 由元模型自行學習組合，因此不搜尋權重參數
 - **交叉驗證**: TimeSeriesSplit (n_splits=5) + Purge/Embargo (防止標籤視窗重疊洩漏)
 - **類別不平衡處理**: SMOTE (僅在訓練折上套用) + Class-weight (USE_CLASS_WEIGHTS)
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
-- **走動前推回測**: 訓練後自動執行 purged walk-forward backtest，驗證真實表現
+- **走動前推回測**: 訓練後自動在 purged 擴展窗口上回測。為加快速度使用預設超參數 (無 Optuna)，但會解析出與**實際部署模型相同的集成模式** (Blending > Stacking > Voting)，並套用**最佳化後的 Buy/Sell 閾值**，確保回測結果反映真正上線的行為
 - **評估指標**: F1 Score, AUC, Precision, Recall
 - **ROC 曲線**: 自動儲存至 `models/roc_curve_{timeframe}.png`
-- **特徵相關性過濾**: 自動移除 |corr| > 0.9 的冗餘特徵
+- **特徵相關性過濾**: 自動移除 |corr| > 0.95 的冗餘特徵
 - **閾值優化**: 自動搜尋最佳 Buy/Sell 信心度閾值 (取代固定 0.55/0.45)
 - **模型版本化**: 帶時間戳備份，自動保留最近 5 版
 - **特徵重要性**: 輸出至 `models/feature_importance_{timeframe}.csv`
@@ -450,11 +450,20 @@ project_root/
 | `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
 | `USE_CLASS_WEIGHTS` | `True` | 啟用類別不平衡權重 (SMOTE=True 時通常無效) |
 | `USE_GPU` | `False` | CatBoost 使用 GPU 訓練 (需要 NVIDIA GPU，會使用更多記憶體) |
-| `USE_WALK_FORWARD` | `True` | 訓練後自動執行走動前推回測 |
+| `USE_WALK_FORWARD` | `True` | 訓練後自動執行走動前推回測 (與部署模型相同的集成模式) |
 
 **優先級規則：**
-- `USE_STACKING=True` 或 `USE_BLENDING=True` → 強制使用集成模式
-- `USE_ENSEMBLE=True` (預設) → VotingClassifier (加權平均)
+模式依下列順序解析，**第一個符合者勝出**，因此這些開關**並非互相獨立**：
+
+1. `USE_BLENDING=True` → Blending (out-of-fold)
+2. `USE_STACKING=True` → StackingClassifier (元模型學習組合)
+3. `USE_ENSEMBLE=True` (預設) → VotingClassifier (加權平均)
+4. `USE_ENSEMBLE=False` → 單一最佳模型 (XGBoost vs LightGBM vs CatBoost)
+
+- `USE_STACKING=True` 或 `USE_BLENDING=True` **強制使用集成模式**，即使 `USE_ENSEMBLE=False`
+- 因此 `USE_ENSEMBLE=True` **只有在** `USE_STACKING` 與 `USE_BLENDING` **皆為 False 時**才會產生 VotingClassifier。當 `USE_STACKING=True` 時，儲存的 `model_type` 為 `stacking`
+- 若 `USE_STACKING` 與 `USE_BLENDING` 同時為 True，則 `USE_BLENDING` 優先
+- `USE_SMOTE`、`USE_CATBOOST`、`USE_CLASS_WEIGHTS`、`USE_GPU`、`USE_WALK_FORWARD` 適用於以上所有模式
 - `USE_ENSEMBLE=False` → 單一最佳模型 (XGBoost vs LightGBM vs CatBoost)
 
 **訓練速度：**
@@ -691,13 +700,13 @@ A: 修改 `.env` 中的 `STOCK_LIST`，例如 `STOCK_LIST=0700,9988,0005,0939,18
 A: 日誌位於 `logs/app.log`
 
 ### Q: 訓練要多久？
-A: 約 3-5 分鐘 (使用平行訓練，時間範圍同時訓練)。若使用 Stacking 或 Blending，約 5-8 分鐘。
+A: 取決於集成模式，因為 Stacking 與 Blending 會在內部重新擬合子模型。粗估 **Voting 約 5-15 分鐘**、**Stacking 約 15-40 分鐘**、**Blending 約 30-60 分鐘以上**；`USE_WALK_FORWARD=True` 會再為每個時間範圍增加 5 折回測。三個時間範圍平行訓練，因此實際耗時由最慢的那個決定。上述為一般硬體上的量級估算而非保證，實際數值請查看 `logs/app.log`。
 
 ### Q: 預測要多久？
 A: 平行預測多支股票，約 5-10 秒 (取決於股票數量)。
 
 ### Q: 什麼是特徵相關性過濾？
-A: 訓練前自動移除 |corr| > 0.9 的冗餘特徵。例如 `ret_3d` 與 `ret_1d`/`ret_5d` 高度相關，只保留最具資訊量的一個。減少噪音、加快訓練、降低過擬合。
+A: 訓練前自動移除 |corr| > 0.95 的冗餘特徵。例如 `ret_3d` 與 `ret_1d`/`ret_5d` 高度相關，只保留最具資訊量的一個。減少噪音、加快訓練、降低過擬合。
 
 ### Q: 閾值優化是什麼？
 A: 一般系統用固定閾值 (Buy > 55%, Sell < 45%)，但不同時間範圍的最佳閾值不同。系統會在驗證集上自動搜尋使 F1 最高的 Buy/Sell 閾值，訓練後存入模型。
@@ -791,10 +800,10 @@ A: 滾動準確度 = 最近 30 天內正確預測數 / 總預測數 × 100%。�
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。
 
 ### Q: 測試覆蓋了哪些功能？
-A: 共 115 個測試，涵蓋：
+A: 共 116 個測試，涵蓋：
 - 環境變數載入與驗證 (10 個)
 - 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個)
-- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Purge/Embargo CV、Walk-forward (22 個)
+- 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Stacking、Purge/Embargo CV、Walk-forward (23 個)
 - 預測功能：日期計算、模型載入、信號判定、上傳、同日去重、動態集成機率 (13 個)
 - 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (34 個)
 - 模型監控：預測驗證、信心度校準 ECE (8 個)
