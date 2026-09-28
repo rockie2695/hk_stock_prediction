@@ -925,6 +925,7 @@ A: 動態權重追蹤每個模型 (XGBoost/LightGBM/RandomForest/CatBoost) 的�
 - 目前預設關閉 (USE_DYNAMIC_WEIGHTING=False)
 - 權重儲存在 `models/dynamic_weights.json`
 - 每次預測後自動更新權重
+- **僅適用於 Voting 模式。** Stacking 與 Blending 的元模型本身就是「已學習的組合器」，若手動重新加權子模型，等同丟棄實際訓練並儲存的那個模型。這兩種模式一律沿用模型自身的 `predict_proba`，動態權重僅用於追蹤各子模型的準確度以供展示。
 
 ### Q: 市場狀態偵測如何影響預測？
 A: 市場狀態分為三種：牛市 (MA50>MA200)、熊市 (MA50<MA200)、震盪 (信號混合)。牛市中 Buy 信號更可靠，熊市中 Sell 信號更可靠。儀表板會顯示當前狀態 (🟢/🔴/🟡)，供參考。

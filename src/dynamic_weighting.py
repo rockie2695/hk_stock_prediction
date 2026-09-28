@@ -107,45 +107,84 @@ def get_dynamic_weights(stock_code: str, timeframe: str) -> dict:
     return {'xgb': 0.25, 'lgb': 0.25, 'rf': 0.25, 'cb': 0.25}
 
 
+def iter_fitted_estimators(model) -> dict:
+    """Return {name: fitted base estimator} for any ensemble shape.
+    取得任意集成形式的 {名稱: 已擬合子模型} 字典。
+
+    sklearn's VotingClassifier/StackingClassifier expose `named_estimators_` as the
+    name->estimator mapping; their `estimators_` is a bare list of estimators, NOT
+    (name, estimator) pairs, so unpacking it raises ValueError. BlendingClassifier
+    stores pairs in `fitted_estimators` and mirrors them as `named_estimators_`.
+    sklearn 的 estimators_ 是純 estimator 陣列而非 (名稱, estimator) 配對，直接解包會出錯。
+    """
+    named = getattr(model, 'named_estimators_', None)
+    if isinstance(named, dict):
+        return dict(named)
+    return {}
+
+
+def has_learned_combiner(model) -> bool:
+    """True when the ensemble combines base models with a fitted meta-model.
+    判斷集成是否以「已擬合的元模型」組合子模型。
+
+    Dynamic re-weighting only makes sense for flat voting. Stacking and Blending learn
+    the combination themselves, so hand-averaging the base learners would silently
+    discard the meta-model that was actually trained and shipped.
+    動態加權僅適用於扁平投票；Stacking/Blending 的組合器是已學習的元模型，
+    手動平均子模型等同丟棄它。
+    """
+    return hasattr(model, 'final_estimator_') or hasattr(model, 'meta_model')
+
+
 def compute_dynamic_ensemble_prediction(model_data: dict, X: pd.DataFrame, stock_code: str, timeframe: str) -> np.ndarray:
     """
     Make prediction using dynamically weighted ensemble.
     使用動態加權集成進行預測。
-    
+
+    For Stacking/Blending the fitted meta-model is the learned combiner, so the model's
+    own predict_proba is used and dynamic weights are deliberately NOT applied.
+    Stacking/Blending 由元模型學習組合，因此直接使用模型本身的 predict_proba，不套用動態權重。
+
     Args / 參數:
         model_data: Current model data dict / 當前模型數據字典
         X: Feature DataFrame / 特徵 DataFrame
         stock_code: Stock code / 股票代碼
         timeframe: Timeframe label / 時間範圍標籤
-        
+
     Returns / 返回:
         Weighted probability array / 加權機率陣列
     """
     model = model_data.get('model')
-    
-    if not hasattr(model, 'estimators_'):
+
+    estimators = iter_fitted_estimators(model)
+    if not estimators:
         # Not an ensemble, return direct prediction / 非集成模型，直接返回預測
         return model.predict_proba(X)[:, 1]
-    
+
+    if has_learned_combiner(model):
+        # Meta-model is the learned combiner - do not bypass it
+        # 元模型即組合器，不可繞過
+        return model.predict_proba(X)[:, 1]
+
     # Get individual model predictions / 取得各模型預測
     weights = get_dynamic_weights(stock_code, timeframe)
-    
+
     weighted_proba = np.zeros(len(X))
-    total_weight = 0
-    
-    for name, estimator in model.estimators_:
+    total_weight = 0.0
+
+    for name, estimator in estimators.items():
         try:
             proba = estimator.predict_proba(X)[:, 1]
-            weight = weights.get(name, 1.0 / len(model.estimators_))
-            weighted_proba += proba * weight
-            total_weight += weight
         except Exception as e:
             logger.warning(f"Failed to get prediction from {name}: {e} / 無法取得 {name} 預測")
             continue
-    
+        weight = weights.get(name, 1.0 / len(estimators))
+        weighted_proba += proba * weight
+        total_weight += weight
+
     if total_weight > 0:
         weighted_proba /= total_weight
-    
+
     return weighted_proba
 
 

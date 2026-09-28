@@ -640,7 +640,19 @@ def _create_blending_ensemble(estimators, tscv, days: Optional[int] = None):
             self.days = days
             self.meta_model = LogisticRegression(random_state=42)
             self.fitted_estimators = []
-            
+
+        @property
+        def named_estimators_(self):
+            """{name: fitted base estimator}, matching sklearn's convention.
+            與 sklearn 一致的 {名稱: 已擬合子模型} 屬性契約。
+
+            sklearn's VotingClassifier/StackingClassifier expose this mapping, so giving
+            Blending the same view lets every consumer (disagreement detection, dynamic
+            weighting, tree export) handle all three modes without a special case.
+            讓下游客共用同一套處理邏輯，無需為 Blending 特別分支。
+            """
+            return dict(self.fitted_estimators)
+
         def fit(self, X, y):
             # Generate out-of-fold predictions for meta-features
             # (purged to prevent label leakage from overlapping windows)
@@ -875,12 +887,19 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
     logger.info(f"  F1={best_f1:.4f}, AUC={best_auc:.4f}, Precision={precision:.4f}, Recall={recall:.4f}")
 
     # Feature importance
+    # Single models expose `feature_importances_`; every ensemble shape (Voting,
+    # Stacking, Blending) exposes `named_estimators_`, so mean the base models.
+    # 使用 named_estimators_ 而非 estimators_，Blending 才不會得到全 0 重要度。
     if hasattr(best_model, 'feature_importances_'):
         importances = best_model.feature_importances_
-    elif hasattr(best_model, 'estimators_'):
-        importances = np.mean([e.feature_importances_ for e in best_model.estimators_ if hasattr(e, 'feature_importances_')], axis=0)
     else:
-        importances = np.zeros(len(available_features))
+        base_estimators = list(getattr(best_model, 'named_estimators_', {}).values())
+        sub_importances = [e.feature_importances_ for e in base_estimators
+                           if hasattr(e, 'feature_importances_')]
+        if sub_importances:
+            importances = np.mean(sub_importances, axis=0)
+        else:
+            importances = np.zeros(len(available_features))
 
     importance_df = pd.DataFrame({
         'feature': available_features,
@@ -1004,16 +1023,11 @@ def _save_tree_visualizations(model, timeframe_label: str, model_type: str, feat
         logger.info(f"  Skipping tree export for single model type: {model_type}")
         return
     
-    # For voting/stacking: extract sub-estimators from the fitted ensemble
-    # 對於 voting/stacking：從擬合的集成模型中提取子估計器
-    estimators_to_plot = []
-    
+    # Uniform access to fitted sub-models. VotingClassifier, StackingClassifier and the
+    # project's BlendingClassifier all expose `named_estimators_`.
+    # 統一取用已擬合子模型：三種集成模式都提供 named_estimators_。
     if hasattr(model, 'named_estimators_'):
-        # VotingClassifier or StackingClassifier
         estimators_to_plot = list(model.named_estimators_.items())
-    elif hasattr(model, 'fitted_estimators'):
-        # Blending ensemble
-        estimators_to_plot = [(name, est) for name, est in model.fitted_estimators]
     else:
         logger.warning("  Model has no estimators to plot")
         return

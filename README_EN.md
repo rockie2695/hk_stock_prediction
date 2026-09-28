@@ -925,6 +925,7 @@ A: Dynamic weighting tracks each model's recent performance, uses EMA to adjust 
 - Currently disabled by default (USE_DYNAMIC_WEIGHTING=False)
 - Weights stored in `models/dynamic_weights.json`
 - Weights auto-update after each prediction
+- **Applies to Voting mode only.** In Stacking and Blending the fitted meta-model *is* the learned combiner, so re-weighting the base learners by hand would silently discard the model that was actually trained and saved. Those modes keep using their own `predict_proba`, and dynamic weights are only used to track per-model accuracy for display.
 
 ### Q: How does Regime Detection affect predictions?
 A: Regime has three states: Bull (MA50>MA200), Bear (MA50<MA200), Sideways (mixed). Buy signals are more reliable in Bull markets, Sell signals in Bear. Dashboard displays current state (🟢/🔴/🟡) for reference.

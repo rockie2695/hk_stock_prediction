@@ -19,6 +19,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import STOCK_LIST, SUPABASE_URL, SUPABASE_KEY, USE_DYNAMIC_WEIGHTING
 from src.data_fetcher import fetch_stock_data
+from src.dynamic_weighting import iter_fitted_estimators
 from src.feature_engineering import compute_features, compute_extended_features, FEATURE_COLUMNS
 from src.logger import setup_logger
 
@@ -339,7 +340,8 @@ def _dynamic_ensemble_proba(model_data: dict, X: pd.DataFrame, stock_code: str, 
         compute_dynamic_ensemble_prediction, update_model_weights, evaluate_model_performance
     )
     model = model_data['model']
-    if not hasattr(model, 'estimators_'):
+    base_estimators = iter_fitted_estimators(model)
+    if not base_estimators:
         return model.predict_proba(X)[0][1]
 
     days = TIMEFRAMES[label]
@@ -354,7 +356,7 @@ def _dynamic_ensemble_proba(model_data: dict, X: pd.DataFrame, stock_code: str, 
         if len(valid_target) >= 20:
             model_features = model_data.get('feature_columns', list(valid.columns))
             X_recent = valid.loc[valid_target.index, [c for c in model_features if c in valid.columns]]
-            for name, estimator in model.estimators_:
+            for name, estimator in base_estimators.items():
                 try:
                     preds = estimator.predict(X_recent)
                     acc = evaluate_model_performance(valid_target.values, preds)['accuracy']
@@ -443,7 +445,13 @@ def predict_stock(stock_code: str, models: dict) -> list:
 
         # Predict with available features
         try:
-            if USE_DYNAMIC_WEIGHTING and hasattr(model, 'estimators_'):
+            # Gate on iter_fitted_estimators, not hasattr('estimators_'), so Blending
+            # models are included. Inside, compute_dynamic_ensemble_prediction defers to
+            # the fitted meta-model for Stacking/Blending, so the meta-learner is never
+            # bypassed even when dynamic weighting is switched on.
+            # 以 iter_fitted_estimators 判斷而非 hasattr，避免漏掉 Blending；
+            # Stacking/Blending 仍會走模型本身的 meta-model，不會被繞過。
+            if USE_DYNAMIC_WEIGHTING and iter_fitted_estimators(model):
                 # Dynamically weighted ensemble prediction / 動態加權集成預測
                 buy_prob = _dynamic_ensemble_proba(model_data, X, stock_code, label, df, valid)
             else:
@@ -457,11 +465,17 @@ def predict_stock(stock_code: str, models: dict) -> list:
         # For ensemble models, check individual model predictions
         model_disagreement = 0.0
         model_split = "0/4"
-        
-        if hasattr(model, 'estimators_'):
+
+        # Covers Voting, Stacking and Blending - BlendingClassifier used to be skipped
+        # here because it exposes `named_estimators_` rather than `estimators_`,
+        # which silently reported 0/4 (no disagreement) for every blending model.
+        # 涵蓋 Voting、Stacking 與 Blending；Blending 過去因屬性不同而被跳過，
+        # 導致所有 blending 模型永遠顯示 0/4（無分歧）。
+        base_estimators = iter_fitted_estimators(model)
+        if base_estimators:
             # Ensemble model - get individual predictions
             individual_predictions = []
-            for estimator in model.estimators_:
+            for estimator in base_estimators.values():
                 try:
                     ind_proba = estimator.predict_proba(X)[0]
                     ind_buy = ind_proba[1]
