@@ -44,7 +44,7 @@ Local Windows scheduled training (parallel) → Upload predictions to Supabase (
 - **Portfolio Simulation**: Multi-stock portfolio simulation, shows portfolio performance and diversification effects
 - **Confidence-Weighted Strategy**: Adjusts position size based on signal confidence (high confidence = larger position)
 - **Monte Carlo Test**: Randomly flips signals to test strategy robustness, shows return distribution (customizable 100-5000 simulations)
-- **HK Public Holiday Calendar**: Prediction dates auto-skip HK market holidays, fetches holiday data from official 1823.gov.hk API (including Lunar New Year)
+- **HK Public Holiday Calendar**: `src/trading_calendar.py` is the single source of truth for "is the market open?" — weekends **and** HK public holidays (fetched from the official 1823.gov.hk API, including Lunar New Year, cached 30 days). `run_daily.bat`, `train_model.py` and `predict_upload.py` all consult it, so scheduled and manual runs behave identically
 - **Slippage Simulation**: Simulates real trading slippage — buy price slightly higher, sell price slightly lower (adjustable 0-1%)
 - **Board Lot Trading**: Calculates buy quantity per HK minimum trading unit (board lot), closer to real trading
 - **Stop Loss/Take Profit Execution**: Auto-closes positions based on predicted stop loss/take profit levels (checks daily prices between signal dates)
@@ -194,12 +194,13 @@ python -m pytest tests/ -v --tb=short
 | `test_connect_flow.py` | 6 | Connect flow feature computation, real data fallback, proxy mode |
 | `test_regime.py` | 5 | Market regime detection |
 | `test_online_learner.py` | 4 | Online learning |
-| `test_dynamic_weighting.py` | 5 | Dynamic ensemble weighting |
+| `test_dynamic_weighting.py` | 14 | Dynamic ensemble weighting, ensemble introspection, meta-learner preservation, production-file isolation |
 | `test_model_monitoring.py` | 8 | Prediction validation, confidence calibration (ECE) |
 | `test_notifier.py` | 7 | Telegram notifications (incl. truncation, enable/disable) |
 | `test_backtest.py` | 2 | Backtest page |
 | `test_portfolio.py` | 2 | Portfolio page |
-| **Total** | **116** | |
+| `test_trading_calendar.py` | 17 | HK market calendar: weekends, public holidays, fail-open, next trading day |
+| **Total** | **142** | |
 
 ## Windows Task Scheduler Setup
 
@@ -215,7 +216,7 @@ Set up Windows Task Scheduler to auto-execute daily at 16:30 (after HK market cl
    - ✅ Wake computer to run this task
    - ✅ Run whether user is logged on or not
 
-> **Note:** HK market trading hours are 9:30-16:00 HKT. Schedule at 16:30 to ensure closing data is fully loaded. Weekends and public holidays are non-trading days — the system auto-skips them.
+> **Note:** HK market trading hours are 9:30-16:00 HKT. Schedule at 16:30 to ensure closing data is fully loaded. Weekends **and HK public holidays** are non-trading days — the whole pipeline is skipped automatically (train, cleanup, predict and upload all do nothing), with the reason written to `logs/run_log.txt`.
 
 ## Output Files After Running run_daily.bat
 
@@ -260,7 +261,7 @@ Set up Windows Task Scheduler to auto-execute daily at 16:30 (after HK market cl
 | `catboost_info/` | CatBoost training scratch files (safe to ignore) |
 | Telegram (optional) | Success/failure notification when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are set |
 
-> **Note:** Step 1 (training) takes ~5-15 min in Voting mode and considerably longer in Stacking/Blending (see "How long does training take?"); steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. Runs on Saturday/Sunday are skipped entirely with no output.
+> **Note:** Step 1 (training) takes ~5-15 min in Voting mode and considerably longer in Stacking/Blending (see "How long does training take?"); steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. On Saturdays, Sundays and HK public holidays the entire run is skipped with no output.
 
 ## Docker Deployment
 
@@ -345,6 +346,7 @@ project_root/
 │   ├── logger.py         # Logger configuration
 │   ├── init_database.py  # Auto-create tables (idempotent)
 │   ├── data_fetcher.py   # Download HK stock data (akshare/yfinance)
+│   ├── trading_calendar.py  # HK market calendar: weekends + public holidays (gates the daily run)
 │   ├── feature_engineering.py  # 48 technical indicators (33 base + 15 extended)
 │   ├── train_model.py    # Optuna tuning + Voting/Stacking ensemble + SMOTE
 │   ├── predict_upload.py # Daily prediction & upload to Supabase
@@ -696,6 +698,17 @@ A: SMOTE (Synthetic Minority Over-sampling Technique) generates synthetic sample
 ### Q: Can I add more stocks?
 A: Edit `STOCK_LIST` in `.env`, e.g. `STOCK_LIST=0700,9988,0005,0939,1810`
 
+### Q: What happens on weekends and HK public holidays?
+A: The whole pipeline is skipped — no training, no cleanup, no prediction, no upload — and the reason is logged to `logs/run_log.txt`. `src/trading_calendar.py` is the single source of truth: `run_daily.bat`, `train_model.py` and `predict_upload.py` all ask it, so the scheduled run and a manual `python src/train_model.py` behave identically.
+
+Holiday dates come from the official 1823.gov.hk iCal feed and are cached in `cache/hk_holidays.json` for 30 days, so Lunar New Year and other lunar-calendar holidays are covered. The cache is refreshed automatically when older than 30 days.
+
+**Fail-open by design:** if the holiday list cannot be determined (1823.gov.hk unreachable **and** no fresh cache), the pipeline **runs anyway** rather than skipping. A false "holiday" verdict would silently drop a real trading day's prediction, which is much worse than the wasted compute of a false "trading day" verdict. The degraded lookup is logged as `holiday list UNRELIABLE`.
+
+Two known limitations:
+- **Lunar New Year / Ching Ming / Buddha's Birthday / Tuen Ng / Mid-Autumn / Chung Yeung** cannot be hardcoded, so when the pipeline falls back to a built-in list (API down *and* cache missing) those days are not detected. The fallback is flagged unreliable precisely so it is never used to skip work.
+- **Typhoon / rainstorm closures** are announced same-day and appear in no published calendar, so they cannot be predicted in advance. Check `logs/app.log` on those mornings.
+
 ### Q: How to view training logs?
 A: Logs are at `logs/app.log`
 
@@ -800,12 +813,13 @@ A: Rolling accuracy = correct predictions in last 30 days / total predictions ×
 A: Run tests with pytest: `python -m pytest tests/ -v`. Tests cover env config, feature engineering, model training, prediction upload core functionality.
 
 ### Q: What features are covered by tests?
-A: 116 tests covering:
+A: 142 tests covering:
 - Env var loading & validation (10)
 - Technical indicator calculation: RSI, MACD, ATR, ADX, Stochastic, MFI, Williams %R (17)
 - Model training: XGBoost, LightGBM, RandomForest, CatBoost (incl. early stopping), SMOTE, Blending, Stacking, Purge/Embargo CV, Walk-forward (23)
 - Prediction: date calculation, model loading, signal determination, upload, same-day dedup, dynamic ensemble proba (13)
-- Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (34)
+- Extended features: sentiment, sector, short selling, connect flow, regime, online learning, dynamic weighting (43)
+- HK market calendar: weekends, public holidays, fail-open lookup, next trading day (17)
 - Model monitoring: prediction validation, confidence calibration ECE (8)
 - Telegram notifications: truncation, enable/disable (7)
 - Dashboard pages: backtest page, portfolio page (4)

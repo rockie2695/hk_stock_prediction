@@ -22,6 +22,7 @@ from src.data_fetcher import fetch_stock_data
 from src.dynamic_weighting import iter_fitted_estimators
 from src.feature_engineering import compute_features, compute_extended_features, FEATURE_COLUMNS
 from src.logger import setup_logger
+from src.trading_calendar import fetch_hk_holidays, should_run_today
 
 logger = setup_logger('predict_upload')
 HK_TZ = pytz.timezone('Asia/Hong_Kong')
@@ -35,9 +36,6 @@ TIMEFRAMES = {'1d': 1, '5d': 5, '20d': 20}
 # Module-level Supabase client (created once)
 _supabase_client: Optional[Client] = None
 
-HK_HOLIDAY_API = "https://www.1823.gov.hk/common/ical/en.json"
-HK_HOLIDAY_CACHE_FILE = os.path.join(CACHE_DIR, 'hk_holidays.json')
-
 
 def get_supabase_client() -> Client:
     """Get or create a singleton Supabase client."""
@@ -47,69 +45,13 @@ def get_supabase_client() -> Client:
     return _supabase_client
 
 
-def fetch_hk_holidays_online() -> Set[str]:
-    """
-    Fetch HK public holidays from official 1823.gov.hk API.
-    Caches to local file; refreshes if cache is older than 30 days.
-
-    Returns:
-        Set of date strings like {'2026-01-01', '2026-02-17', ...}
-    """
-    import urllib.request
-    import urllib.error
-
-    # Check cache freshness (30 days)
-    if os.path.exists(HK_HOLIDAY_CACHE_FILE):
-        cache_age = datetime.now().timestamp() - os.path.getmtime(HK_HOLIDAY_CACHE_FILE)
-        if cache_age < 30 * 24 * 3600:
-            try:
-                with open(HK_HOLIDAY_CACHE_FILE, 'r') as f:
-                    cached = json.load(f)
-                logger.info(f"[holiday-api] Loaded {len(cached)} holidays from cache")
-                return set(cached)
-            except Exception as e:
-                logger.warning(f"[holiday-api] Cache read failed: {e}")
-
-    # Fetch from API
-    holidays = set()
-    try:
-        req = urllib.request.Request(HK_HOLIDAY_API, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode('utf-8-sig'))
-
-        vevents = data.get('vcalendar', [{}])[0].get('vevent', [])
-        for event in vevents:
-            dtstart = event.get('dtstart', [''])[0] if isinstance(event.get('dtstart'), list) else event.get('dtstart', '')
-            if dtstart and len(dtstart) == 8:
-                formatted = f"{dtstart[:4]}-{dtstart[4:6]}-{dtstart[6:]}"
-                holidays.add(formatted)
-
-        logger.info(f"[holiday-api] Fetched {len(holidays)} holidays from 1823.gov.hk")
-
-        # Save cache
-        with open(HK_HOLIDAY_CACHE_FILE, 'w') as f:
-            json.dump(sorted(holidays), f, indent=2)
-
-    except Exception as e:
-        logger.warning(f"[holiday-api] Online fetch failed: {e}. Using fallback.")
-        # Fallback: at least include well-known fixed holidays for current year
-        year = datetime.now(HK_TZ).year
-        holidays = {
-            f"{year}-01-01", f"{year}-04-03", f"{year}-04-04", f"{year}-04-05",
-            f"{year}-04-06", f"{year}-04-07", f"{year}-05-01", f"{year}-07-01",
-            f"{year}-10-01", f"{year}-12-25", f"{year}-12-26",
-        }
-
-    return holidays
-
-
 def get_prediction_date(days_ahead: int) -> str:
     """Get the prediction target date (count only business days, skip weekends and HK holidays)."""
     today = datetime.now(HK_TZ).date()
     target = today
     count = 0
 
-    hk_holidays = fetch_hk_holidays_online()
+    hk_holidays = fetch_hk_holidays()
     # Also add edges for year boundaries
     year = today.year
     hk_holidays.add(f"{year-1}-12-31")
@@ -754,9 +696,15 @@ def predict_and_upload() -> None:
 
 
 if __name__ == '__main__':
-    try:
-        predict_and_upload()
-    except Exception as e:
-        from src.notifier import notify_failure
-        notify_failure("預測 / Prediction", e)
-        raise
+    should_run, reason = should_run_today()
+    if not should_run:
+        logger.info(f"[market-calendar] Skipping prediction: {reason}")
+        print(f"Skipping prediction: {reason}")
+    else:
+        logger.info(f"[market-calendar] {reason}")
+        try:
+            predict_and_upload()
+        except Exception as e:
+            from src.notifier import notify_failure
+            notify_failure("預測 / Prediction", e)
+            raise

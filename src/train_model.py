@@ -1365,6 +1365,15 @@ def train_all_models(stock_codes: list):
 
 
 if __name__ == '__main__':
+    from src.trading_calendar import should_run_today
+
+    should_run, reason = should_run_today()
+    if not should_run:
+        logger.info(f"[market-calendar] Skipping training: {reason}")
+        print(f"Skipping training: {reason}")
+        sys.exit(0)
+
+    logger.info(f"[market-calendar] {reason}")
     logger.info("=== Model Training Started ===")
     logger.info(f"Stock codes: {STOCK_LIST}")
     try:

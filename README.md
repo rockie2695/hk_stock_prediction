@@ -44,7 +44,7 @@ Windows 本地定時訓練 (平行) → 預測結果上傳至 Supabase (PostgreS
 - **組合模擬**: 多股票組合模擬，顯示組合表現和 diversification 效果
 - **信心度加權策略**: 根據信號信心度調整倉位大小 (高信心=大倉位)
 - **蒙地卡羅測試**: 隨機翻轉信號，測試策略穩健性，顯示報酬分佈 (可自訂模擬次數 100-5000)
-- **HK 公曆日曆**: 預測日期自動跳過港股休市日，從官方 1823.gov.hk API 即時獲取假期數據 (含農曆節日)
+- **HK 公曆日曆**: `src/trading_calendar.py` 是「今日是否開市」的單一判斷來源 — 同時處理週末與香港公眾假期 (假期資料取自官方 1823.gov.hk API，含農曆節日，快取 30 天)。`run_daily.bat`、`train_model.py`、`predict_upload.py` 皆呼叫它，因此排程執行與手動執行行為一致
 - **滑點模擬**: 模擬實際交易滑點，買入價格略高、賣出價格略低 (可調 0-1%)
 - **板手交易**: 按港股最低交易單位 (board lot) 計算買入股數，更貼近實際交易
 - **止損/止盈執行**: 根據預測的止損/止盈水平自動平倉 (在信號日之間檢查每日價格)
@@ -190,14 +190,15 @@ python -m pytest tests/ -v --tb=short
 | `test_sector.py` | 4 | 板塊輪動特徵計算 |
 | `test_short_selling.py` | 4 | 沽空比率特徵計算 |
 | `test_connect_flow.py` | 6 | 互聯互通資金流特徵計算、真實數據回退、代理模式 |
-| `test_regime.py` | 4 | 市場狀態偵測 |
-| `test_online_learner.py` | 3 | 增量學習 |
-| `test_dynamic_weighting.py` | 5 | 動態集成權重 |
+| `test_regime.py` | 5 | 市場狀態偵測 |
+| `test_online_learner.py` | 4 | 增量學習 |
+| `test_dynamic_weighting.py` | 14 | 動態集成權重、集成模型內部結構解析、保留元模型、正式檔案隔離 |
 | `test_model_monitoring.py` | 8 | 預測驗證、信心度校準 (ECE) |
 | `test_notifier.py` | 7 | Telegram 通知 (含截斷、啟用/停用) |
 | `test_backtest.py` | 2 | 回測頁面 |
 | `test_portfolio.py` | 2 | 投資組合頁面 |
-| **總計** | **116** | |
+| `test_trading_calendar.py` | 17 | 港股交易日曆：週末、公眾假期、fail-open、下一個交易日 |
+| **總計** | **142** | |
 
 ## 設定 Windows 自動排程
 
@@ -213,7 +214,7 @@ python -m pytest tests/ -v --tb=short
    - ✅ 喚醒電腦執行此工作
    - ✅ 不論使用者是否登入都要執行
 
-> **Note:** 港股市場交易時間為 9:30-16:00 HKT。建議排程設定在 16:30，確保收盤數據已完全載入。週六、日及公眾假期為休市日，系統會自動跳過。
+> **Note:** 港股市場交易時間為 9:30-16:00 HKT。建議排程設定在 16:30，確保收盤數據已完全載入。週六、日**及公眾假期**為休市日 — 整個流程會自動跳過 (訓練、清理、預測上傳全部不執行)，原因會寫入 `logs/run_log.txt`。
 
 ## 執行 run_daily.bat 後的輸出檔案
 
@@ -258,7 +259,7 @@ python -m pytest tests/ -v --tb=short
 | `catboost_info/` | CatBoost 訓練過程暫存檔（可忽略） |
 | Telegram（可選） | 設定 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 後，成功/失敗會發送通知 |
 
-> **Note:** 步驟 1（訓練）在 Voting 模式約 5-15 分鐘，Stacking / Blending 模式會明顯更久（詳見「訓練要多久？」）；步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日執行時會直接跳過，不產生任何輸出。
+> **Note:** 步驟 1（訓練）在 Voting 模式約 5-15 分鐘，Stacking / Blending 模式會明顯更久（詳見「訓練要多久？」）；步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日及香港公眾假期會跳過整個流程，不產生任何輸出。
 
 ## Docker 部署
 
@@ -344,6 +345,7 @@ project_root/
 │   ├── logger.py         # 日誌設定
 │   ├── init_database.py  # 自動建表 (冪等)
 │   ├── data_fetcher.py   # 下載港股歷史數據 (akshare/yfinance)
+│   ├── trading_calendar.py  # 港股交易日曆：週末 + 公眾假期 (每日作業的判斷閘門)
 │   ├── feature_engineering.py  # 48項技術指標計算 (33基礎+15擴展)
 │   ├── train_model.py    # Optuna 自動調參 + Voting/Stacking 集成 + SMOTE
 │   ├── predict_upload.py # 每日預測並上傳 Supabase
@@ -696,6 +698,17 @@ A: SMOTE (Synthetic Minority Over-sampling Technique) 在訓練集上生成少�
 ### Q: 可以添加更多股票嗎？
 A: 修改 `.env` 中的 `STOCK_LIST`，例如 `STOCK_LIST=0700,9988,0005,0939,1810`
 
+### Q: 週末與香港公眾假期會怎樣？
+A: 整個流程會被跳過 — 不訓練、不清理、不預測、不上傳 — 原因會記錄到 `logs/run_log.txt`。`src/trading_calendar.py` 是單一判斷來源：`run_daily.bat`、`train_model.py`、`predict_upload.py` 都會詢問它，因此排程執行與手動執行 `python src/train_model.py` 的行為一致。
+
+假期日期取自官方 1823.gov.hk iCal，並快取於 `cache/hk_holidays.json` 30 天，因此農曆新年等農曆假期也能涵蓋；快取超過 30 天會自動更新。
+
+**採 fail-open 設計：** 若無法確定假期清單（1823.gov.hk 連不上**且**沒有有效快取），流程會**照常執行**而非跳過。原因是「誤判為假期」會靜默漏掉真實交易日的預測，後果遠比「誤判為交易日」浪費算力嚴重。降級狀態會記錄為 `holiday list UNRELIABLE`。
+
+兩項已知限制：
+- **農曆新年／清明／佛誕／端午／中秋／重陽**無法硬編碼，因此當流程退回內建清單（API 失敗*且*快取遺失）時，這些日子無法偵測。回退清單正是因此被標記為「不可靠」，以確保它永不導致跳過作業。
+- **八號風球／黑雨停市**為當日公布，任何預先公布的日曆都不包含，無法預先判斷。當日請查看 `logs/app.log`。
+
 ### Q: 如何查看訓練日誌？
 A: 日誌位於 `logs/app.log`
 
@@ -800,12 +813,13 @@ A: 滾動準確度 = 最近 30 天內正確預測數 / 總預測數 × 100%。�
 A: 使用 pytest 執行測試：`python -m pytest tests/ -v`。測試覆蓋環境變數設定、特徵工程、模型訓練、預測上傳等核心功能。
 
 ### Q: 測試覆蓋了哪些功能？
-A: 共 116 個測試，涵蓋：
+A: 共 142 個測試，涵蓋：
 - 環境變數載入與驗證 (10 個)
 - 技術指標計算：RSI、MACD、ATR、ADX、Stochastic、MFI、Williams %R (17 個)
 - 模型訓練：XGBoost、LightGBM、RandomForest、CatBoost (含 early stopping)、SMOTE、Blending、Stacking、Purge/Embargo CV、Walk-forward (23 個)
 - 預測功能：日期計算、模型載入、信號判定、上傳、同日去重、動態集成機率 (13 個)
-- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (34 個)
+- 擴展特徵：情緒、板塊、沽空、互聯互通、市場狀態、增量學習、動態權重 (43 個)
+- 港股交易日曆：週末、公眾假期、fail-open 查詢、下一個交易日 (17 個)
 - 模型監控：預測驗證、信心度校準 ECE (8 個)
 - Telegram 通知：截斷、啟用/停用 (7 個)
 - 儀表板頁面：回測頁面、投資組合頁面 (4 個)

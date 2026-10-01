@@ -1,4 +1,5 @@
 """Tests for dynamic weighting module."""
+import json
 import os
 import sys
 import pandas as pd
@@ -7,6 +8,64 @@ import pytest
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PRODUCTION_WEIGHTS_FILE = os.path.join(REPO_ROOT, "models", "dynamic_weights.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_weights_file(tmp_path, monkeypatch):
+    """Redirect dynamic-weight persistence away from the real models/ directory.
+
+    Regression / 回歸修正: WEIGHTS_FILE is a module-level path to the production
+    models/dynamic_weights.json. load/save resolve it at call time, so unless it is
+    redirected every pytest run wrote keys like test_stock_5d / persist_stock_5d into
+    the same file predict_upload.py reads at prediction time.
+    WEIGHTS_FILE 為指向正式 models/ 目錄的模組層級路徑，且在呼叫時才解析，
+    未隔離時每次執行 pytest 都會把測試權重寫進正式檔案。
+    """
+    import src.dynamic_weighting as dw
+
+    tmp_weights = tmp_path / "dynamic_weights.json"
+    monkeypatch.setattr(dw, "WEIGHTS_FILE", str(tmp_weights))
+    return tmp_weights
+
+
+class TestWeightsFileIsolation:
+    """Guards that the test suite never touches production state.
+    確保測試不會寫入正式檔案。"""
+
+    def test_weights_file_is_redirected(self, isolated_weights_file):
+        import src.dynamic_weighting as dw
+        assert os.path.abspath(dw.WEIGHTS_FILE) == os.path.abspath(str(isolated_weights_file))
+        assert os.path.abspath(dw.WEIGHTS_FILE) != os.path.abspath(PRODUCTION_WEIGHTS_FILE)
+
+    def test_update_writes_land_in_tmp_file_only(self, isolated_weights_file):
+        """The write must materialise in tmp, never in models/.
+        寫入必須只落在 tmp 目錄，而非 models/。
+        """
+        from src.dynamic_weighting import update_model_weights, load_dynamic_weights
+
+        update_model_weights('isolation_probe', '5d',
+                             {'xgb': 0.7, 'lgb': 0.65, 'rf': 0.6, 'cb': 0.72}, alpha=0.5)
+
+        assert isolated_weights_file.exists(), "expected weights file in tmp_path"
+        on_disk = json.loads(isolated_weights_file.read_text())
+        assert 'isolation_probe_5d' in on_disk
+        assert 'isolation_probe_5d' in load_dynamic_weights()
+
+    def test_production_file_not_created_by_this_session(self, isolated_weights_file):
+        """If the production file is absent it must stay absent after a write.
+        正式檔案若不存在，測試寫入後仍應維持不存在。
+        """
+        from src.dynamic_weighting import update_model_weights
+
+        if os.path.exists(PRODUCTION_WEIGHTS_FILE):
+            pytest.skip("production weights file exists; covered by manual cleanup check")
+
+        update_model_weights('isolation_probe2', '5d',
+                             {'xgb': 0.7, 'lgb': 0.65, 'rf': 0.6, 'cb': 0.72}, alpha=0.5)
+        assert not os.path.exists(PRODUCTION_WEIGHTS_FILE)
 
 
 class TestDynamicWeighting:
@@ -60,7 +119,6 @@ class TestDynamicWeighting:
     
     def test_weights_persistence(self):
         from src.dynamic_weighting import update_model_weights, save_dynamic_weights, load_dynamic_weights
-        import tempfile
         
         accuracies = {'xgb': 0.7, 'lgb': 0.65, 'rf': 0.6, 'cb': 0.72}
         update_model_weights('persist_stock', '5d', accuracies, alpha=0.5)

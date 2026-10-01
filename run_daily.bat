@@ -4,18 +4,21 @@ cd /d "%~dp0"
 :: Activate virtual environment
 call venv\Scripts\activate.bat
 
-:: Check if today is Saturday (6) or Sunday (7)
-for /f %%a in ('powershell -command "(Get-Date).DayOfWeek.value__"') do set DOW=%%a
-
-if "%DOW%"=="6" (
-    echo Saturday - Market closed, skipping
-    echo Saturday - Market closed, skipping >> logs\run_log.txt
+:: Market calendar gate / 交易日曆判斷
+:: Single source of truth lives in src/trading_calendar.py - covers weekends AND
+:: HK public holidays. Exit code 3 = closed market, skip everything.
+:: 判斷邏輯集中於 src/trading_calendar.py，同時處理週末與香港公眾假期。
+:: 回傳碼 3 代表休市，跳過所有步驟。
+echo Checking HK market calendar...
+python -c "import sys; from src.trading_calendar import should_run_today; ok, reason = should_run_today(); print(reason); sys.exit(0 if ok else 3)"
+if errorlevel 3 (
+    echo Market closed - skipping
+    echo Market closed - %date% %time%>> logs\run_log.txt
     goto :end
 )
-if "%DOW%"=="0" (
-    echo Sunday - Market closed, skipping
-    echo Sunday - Market closed, skipping >> logs\run_log.txt
-    goto :end
+if errorlevel 1 (
+    echo WARNING: calendar check failed, continuing anyway (fail-open)
+    echo WARNING: calendar check failed at %date% %time%>> logs\run_log.txt
 )
 
 echo ====================================
@@ -27,7 +30,7 @@ echo Started at %date% %time% >> logs\run_log.txt
 
 :: Train model
 echo.
-echo [1/3] Training model (this may take 3-8 minutes)...
+echo [1/3] Training model (Voting ~5-15 min; Stacking/Blending longer)...
 echo [1/3] Training model... >> logs\run_log.txt
 python src\train_model.py
 
