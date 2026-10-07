@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import pickle
+import warnings
 from typing import Optional, Set
 import pandas as pd
 import numpy as np
@@ -26,6 +27,18 @@ from src.trading_calendar import fetch_hk_holidays, should_run_today
 
 logger = setup_logger('predict_upload')
 HK_TZ = pytz.timezone('Asia/Hong_Kong')
+
+# sklearn 1.9 emits a benign advisory from _FuncWrapper whenever joblib workers are
+# spawned where sklearn cannot propagate its config - which is exactly what happens
+# here, because prediction runs inside our own ProcessPoolExecutor while the
+# sub-estimators also carry n_jobs. It is not actionable and floods an unattended
+# scheduled run, so silence just this message. Other warnings stay visible.
+# 僅封鎖此一則訊息，其他警告仍會顯示。
+warnings.filterwarnings(
+    "ignore",
+    message=r".*sklearn\.utils\.parallel\.delayed.*",
+    category=UserWarning,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(PROJECT_ROOT, 'models')

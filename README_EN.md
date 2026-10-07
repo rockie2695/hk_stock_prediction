@@ -261,7 +261,7 @@ Set up Windows Task Scheduler to auto-execute daily at 16:30 (after HK market cl
 | `catboost_info/` | CatBoost training scratch files (safe to ignore) |
 | Telegram (optional) | Success/failure notification when `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` are set |
 
-> **Note:** Step 1 (training) takes ~5-15 min in Voting mode and considerably longer in Stacking/Blending (see "How long does training take?"); steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. On Saturdays, Sundays and HK public holidays the entire run is skipped with no output.
+> **Note:** Step 1 (training) takes ~15-25 min in Voting mode but roughly **2 h in Stacking** at the default `OPTUNA_TRIALS=50` — see "How long does training take?" and lower `OPTUNA_TRIALS` if that is too slow. Steps 2 (cleanup) and 3 (predict & upload) take a few seconds each. On Saturdays, Sundays and HK public holidays the entire run is skipped with no output.
 
 ## Docker Deployment
 
@@ -389,7 +389,7 @@ project_root/
 - **Cross-Validation**: TimeSeriesSplit (n_splits=5) + Purge/Embargo, strictly follows time order, no future data leakage
 - **Class Imbalance Handling**: SMOTE (applied only on training folds, never across validation folds)
 - **Training Data**: 3 years of historical data (~750 trading days)
-- **Walk-Forward Backtest**: Runs after training on purged expanding windows. Uses default hyperparameters (no Optuna) for speed, but resolves the **same ensemble mode as the deployed model** (Blending > Stacking > Voting) and applies the **optimized Buy/Sell thresholds**, so the reported backtest reflects what actually ships
+- **Walk-Forward Backtest**: Runs after training on purged expanding windows, and rebuilds **the same mode with the same Optuna-tuned hyperparameters and the same optimized Buy/Sell thresholds as the model that was just saved** — so the reported backtest measures the model that actually ships. In single-model mode it refits the winning estimator rather than an ensemble. Stats include `returns_evaluated` / `returns_dropped_no_future_price`, because the final `days` rows have no future price and are excluded rather than averaged in as `NaN`
 - **Evaluation Metrics**: F1 Score, AUC, Precision, Recall
 - **ROC Curve**: Auto-saved to `models/roc_curve_{timeframe}.png`
 - **Feature Correlation Filter**: Auto-removes redundant features with |corr| > 0.955
@@ -447,13 +447,14 @@ project_root/
 | Env Var | Default | Description |
 |---|---|---|
 | `USE_ENSEMBLE` | `True` | Enable ensemble (False = single model comparison) |
-| `USE_STACKING` | `False` | Use StackingClassifier (meta-model learns combination) |
-| `USE_BLENDING` | `False` | Use Blending (out-of-fold stacking, usually more accurate) |
+| `USE_STACKING` | `False` | StackingClassifier. **Measured worse than Voting here — leave off** (see FAQ) |
+| `USE_BLENDING` | `False` | Blending (out-of-fold). Same caveat as Stacking; off by default |
 | `USE_CATBOOST` | `True` | Include CatBoost as 4th model |
 | `USE_SMOTE` | `True` | Enable SMOTE class imbalance handling |
 | `USE_CLASS_WEIGHTS` | `True` | Class-imbalance weights (usually no-op when SMOTE=True) |
 | `USE_GPU` | `False` | CatBoost GPU training (requires NVIDIA GPU, uses more memory) |
 | `USE_WALK_FORWARD` | `True` | Purged walk-forward backtest after training (same ensemble mode as the deployed model) |
+| `OPTUNA_TRIALS` | `50` | Optuna trials per timeframe. Wall-clock scales close to linearly; lower it to trade hyperparameter quality for speed. Stacking runs ~4x the cost of Voting per trial |
 
 **Priority Rules：**
 Mode is resolved in this order — the **first** match wins, so these flags are **not** independent:
@@ -467,6 +468,8 @@ Mode is resolved in this order — the **first** match wins, so these flags are 
 - Consequently, `USE_ENSEMBLE=True` produces a VotingClassifier **only** when `USE_STACKING` and `USE_BLENDING` are both `False`. With `USE_STACKING=True` the saved `model_type` is `stacking`
 - `USE_BLENDING=True` takes precedence over `USE_STACKING=True` if both are set
 - `USE_SMOTE`, `USE_CATBOOST`, `USE_CLASS_WEIGHTS`, `USE_GPU` and `USE_WALK_FORWARD` apply to every mode above
+
+> **Recommended: keep Stacking and Blending OFF and use soft Voting.** An A/B on identical data, judged on out-of-sample walk-forward AUC, found Voting **significantly better** on the 20-day horizon (0.5904 vs 0.5308, paired-bootstrap 95% CI [+0.039, +0.080]) at roughly **one third** of the training time. See "Why is Voting the default instead of Stacking?".
 
 **Training Speed：**
 - Timeframes (1d, 5d, 20d) **trained in parallel**, ~3x speedup
@@ -682,10 +685,29 @@ A: F1 = balance between precision and recall. F1 > 0.5 means model is better tha
 A: Trains XGBoost, LightGBM, RandomForest, CatBoost simultaneously, combines their prediction probabilities via VotingClassifier (weighted average), StackingClassifier (meta-model learning), or Blending (out-of-fold stacking). Usually more stable and higher AUC than single models.
 
 ### Q: What's the difference between Voting, Stacking, Blending?
-A: 
-- **Voting**: Combines four models' probabilities via weighted average (default, fastest)
-- **Stacking**: Uses a meta-model (LogisticRegression) to learn optimal combination (slower but usually more accurate)
-- **Blending**: Similar to Stacking, but uses out-of-fold predictions to avoid overfitting (slowest but usually most accurate)
+A:
+- **Voting**: Combines four models' probabilities via a tuned weighted average (default, fastest)
+- **Stacking**: Uses a meta-model (LogisticRegression) to learn the combination (slower; **measured worse here**)
+- **Blending**: Similar to Stacking, but uses out-of-fold predictions (slowest; also not recommended here)
+
+### Q: Why is Voting the default instead of Stacking?
+A: Because it was **measured**, not assumed. An A/B was run on byte-identical data with both arms driving the real pipeline, differing only in the mode, then judged on **out-of-sample walk-forward AUC** (not the logged holdout score).
+
+| horizon | Voting AUC | Stacking AUC | difference | 95% CI | verdict |
+|---|---|---|---|---|---|
+| 20d | **0.5904** | 0.5308 | **+0.0596** | [+0.039, +0.080] | Voting better (P=1.000) |
+| 1d | 0.5330 | 0.5194 | +0.0136 | [−0.012, +0.040] | no significant difference |
+
+(5000-resample paired bootstrap on identical rows. Training time: Voting ~8 min vs Stacking ~23 min per timeframe.)
+
+**Why Stacking does not help here — two reasons:**
+
+1. **The four base learners are highly correlated.** XGBoost, LightGBM, CatBoost and RandomForest are all tree models fitted on the *same* 48 features, so their predicted probabilities move together. Stacking only pays off when the base learners are *diverse*; with correlated learners there is little for the meta-model to exploit.
+2. **A linear meta-model over 4 correlated inputs adds almost no capacity.** `LogisticRegression` on four probability inputs is, in effect, learning *another set of weights* — which is exactly what tuned soft Voting already does. So Stacking contributes no expressive power the voting ensemble lacks, while adding estimation variance, and costs ~3x the wall clock because `StackingClassifier(cv=3)` refits the base models inside every CV fold.
+
+**The trap to avoid:** on the 20-day horizon Stacking scored *better* on the logged holdout F1 (0.697 vs 0.655) while being *worse* out-of-sample. Those holdout figures come from the same fold used to select the hyperparameters, and Stacking's larger search space wins that maximisation by construction. Always compare modes on walk-forward AUC, never on the F1/AUC shown in the dashboard.
+
+**If you still want to try it:** set `USE_STACKING=True`. Judge the result by `models/walk_forward_{tf}.csv`, and only keep it if the out-of-sample AUC genuinely improves.
 
 ### Q: What is CatBoost? Why add it?
 A: CatBoost is a gradient boosting framework by Yandex, handles categorical features better, usually outperforms XGBoost/LightGBM on financial data. Adding it improves ensemble accuracy.
@@ -713,7 +735,26 @@ Two known limitations:
 A: Logs are at `logs/app.log`
 
 ### Q: How long does training take?
-A: Depends on the ensemble mode, because Stacking and Blending refit the base models internally. Budget roughly **5-15 min** for Voting, **15-40 min** for Stacking, and **30-60+ min** for Blending, with `USE_WALK_FORWARD=True` adding a further 5-fold pass per timeframe. The 3 timeframes train in parallel, so the wall-clock cost is set by the slowest one. Treat these as orders of magnitude on typical hardware, not guarantees — check `logs/app.log` for actual timings.
+A: It depends almost entirely on the ensemble mode, because Stacking and Blending refit the base models inside every CV fold.
+
+**Measured** on a 20-core machine, 3 timeframes in parallel, ~2750 rows × 46 features:
+
+| Mode | Optuna loop (50 trials) | Notes |
+|---|---|---|
+| Voting | ~15-25 min | 4 base models fitted once per fold |
+| **Stacking** | **~2 h** | `StackingClassifier(cv=3)` refits the base models 3× *inside* every fold, so each trial costs roughly 4× a voting trial |
+| Blending | ~3 h+ | adds its own out-of-fold pass per fold |
+
+Walk-forward adds only ~2 min total. If a run is taking hours, check `logs/app.log` for the gap between `Optuna Ensemble` and `Ensemble best F1 (CV)` — that interval *is* the Optuna loop.
+
+**Three ways to cut it, in order of preference:**
+
+1. **Lower `OPTUNA_TRIALS`** (no code change). Wall-clock scales close to linearly:
+   ```env
+   OPTUNA_TRIALS=20   # ~40% faster than 50, slightly weaker hyperparameter search
+   ```
+2. **Use Voting instead of Stacking** — set `USE_STACKING=False`. Roughly 4× faster, and it is the project's default mode.
+3. **Reduce the dataset** — 3 years of daily bars across 4 stocks gives ~2750 rows, and every extra row multiplies the cost of all ~4000 base-model fits.
 
 ### Q: How long does prediction take?
 A: Parallel prediction across multiple stocks, about 5-10 seconds (depends on stock count).

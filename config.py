@@ -33,6 +33,19 @@ STOCK_LIST_RAW = os.getenv('STOCK_LIST', '')
 STOCK_LIST = [code.strip() for code in STOCK_LIST_RAW.split(',') if code.strip()]
 
 # Model training switches (default: enabled) / 模型訓練開關 (預設：啟用)
+#
+# USE_STACKING / USE_BLENDING default to False because they were measured to be WORSE
+# than soft voting on this dataset. Measured A/B on identical data, judged on
+# out-of-sample walk-forward AUC (paired bootstrap, 5000 resamples), 20d horizon:
+#   voting AUC 0.5904  vs  stacking AUC 0.5308   diff +0.0596  95% CI [+0.039, +0.080]
+# Stacking also looked BETTER on the logged holdout F1 (0.697 vs 0.655) while being
+# worse out-of-sample - the classic signature of selection bias, which is why the
+# holdout metrics must not be used to choose the mode.
+# Reason: the four base learners are all tree models on the same 48 features, so their
+# predictions are highly correlated. A linear meta-learner over 4 correlated inputs
+# spans almost the same function class as tuned soft voting, so it adds no capacity -
+# only estimation variance - while costing ~3x the wall-clock.
+# 實測 stacking 在樣本外明顯劣於 voting，故預設關閉。詳見 README。
 USE_ENSEMBLE = os.getenv("USE_ENSEMBLE", "True").lower() in ("true", "1", "t")
 USE_STACKING = os.getenv("USE_STACKING", "False").lower() in ("true", "1", "t")
 USE_SMOTE = os.getenv("USE_SMOTE", "True").lower() in ("true", "1", "t")
@@ -41,6 +54,12 @@ USE_BLENDING = os.getenv("USE_BLENDING", "False").lower() in ("true", "1", "t")
 USE_GPU = os.getenv("USE_GPU", "False").lower() in ("true", "1", "t")  # GPU for CatBoost / GPU 用於 CatBoost
 USE_CLASS_WEIGHTS = os.getenv("USE_CLASS_WEIGHTS", "True").lower() in ("true", "1", "t")  # Class-imbalance weights / 類別不平衡權重
 USE_WALK_FORWARD = os.getenv("USE_WALK_FORWARD", "True").lower() in ("true", "1", "t")  # Training-time walk-forward backtest / 訓練時走動前推回測
+
+# Optuna trial budget per timeframe / 每個時間範圍的 Optuna 搜尋次數
+# 50 trials x 5 folds x StackingClassifier(cv=3) is inherently expensive on ~2700 rows.
+# Lower this to trade model quality for wall-clock time (20 trials ~ 40% faster).
+# 50 trials 成本較高；調低可換取速度，代價是模型品質。
+OPTUNA_TRIALS = max(1, int(os.getenv("OPTUNA_TRIALS", "50")))
 
 # Extended feature switches (Phase 1) / 擴展特徵開關 (第一階段)
 USE_SENTIMENT = os.getenv("USE_SENTIMENT", "True").lower() in ("true", "1", "t")  # 情緒分析

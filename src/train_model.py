@@ -36,10 +36,23 @@ from typing import Optional
 warnings.filterwarnings('ignore')
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE, USE_CATBOOST, USE_BLENDING, USE_GPU, USE_CLASS_WEIGHTS, USE_WALK_FORWARD
+from config import STOCK_LIST, USE_ENSEMBLE, USE_STACKING, USE_SMOTE, USE_CATBOOST, USE_BLENDING, USE_GPU, USE_CLASS_WEIGHTS, USE_WALK_FORWARD, OPTUNA_TRIALS
 from src.data_fetcher import fetch_stock_data
 from src.feature_engineering import compute_features, compute_target_days, compute_extended_features, FEATURE_COLUMNS, filter_correlated_features
 from src.logger import setup_logger
+
+# Re-apply warning filters AFTER the heavy imports above. optuna / xgboost /
+# lightgbm / catboost can reset the warnings registry during import, which is why
+# the filterwarnings('ignore') on line 36 alone was not reliably in effect.
+# sklearn 1.9 emits a benign _FuncWrapper advisory whenever joblib workers start
+# where sklearn cannot propagate config - unavoidable here, because each timeframe
+# already runs in its own process while sub-estimators also carry n_jobs.
+# 需在重型 import 之後重新套用，否則過濾器會被 import 期間重設。
+warnings.filterwarnings(
+    "ignore",
+    message=r".*sklearn\.utils\.parallel\.delayed.*",
+    category=UserWarning,
+)
 
 logger = setup_logger('train_model')
 
@@ -50,6 +63,20 @@ os.makedirs(CACHE_DIR, exist_ok=True)
 
 # Timeframes: label -> days ahead
 TIMEFRAMES = {'1d': 1, '5d': 5, '20d': 20}
+
+# --- Thread budget -----------------------------------------------------------
+# train_all_models() runs one PROCESS per timeframe, so each worker must not also
+# open a full thread pool. Letting every sub-estimator default to all cores gave
+# 3 processes x (XGB all-cores + LGB all-cores + RF all-cores + CatBoost 4) on a
+# 20-core box: heavy oversubscription, thrashing, and sklearn's nested-parallelism
+# UserWarning. It made a stacking run take >2h instead of well under an hour.
+# 每個時間範圍一個行程，因此子模型不可再開滿執行緒；否則會嚴重超執行緒而拖慢數小時。
+_CPU_COUNT = os.cpu_count() or 1
+MAX_PARALLEL_WORKERS = min(len(TIMEFRAMES), _CPU_COUNT)
+# Threads per estimator inside each worker process.
+# Cap at 4: the dataset is only ~750 rows, so extra threads mostly add joblib
+# overhead rather than throughput. 最多 4 執行緒：資料量小，更多執行緒只增加開銷。
+ESTIMATOR_THREADS = max(1, min(4, _CPU_COUNT // MAX_PARALLEL_WORKERS))
 
 # Try importing CatBoost
 try:
@@ -379,7 +406,8 @@ def train_xgboost(X_train, y_train, trial=None, eval_set=None):
         random_state=42,
         use_label_encoder=False,
         eval_metric='logloss',
-        verbosity=0
+        verbosity=0,
+        n_jobs=ESTIMATOR_THREADS
     )
     model.fit(X_train, y_train)
     return model
@@ -407,7 +435,8 @@ def train_lightgbm(X_train, y_train, trial=None, eval_set=None):
         **params,
         scale_pos_weight=scale_pos_weight,
         random_state=42,
-        verbosity=-1
+        verbosity=-1,
+        n_jobs=ESTIMATOR_THREADS
     )
     model.fit(X_train, y_train)
     return model
@@ -429,7 +458,7 @@ def train_random_forest(X_train, y_train, trial=None, eval_set=None):
     model = RandomForestClassifier(
         **params,
         random_state=42,
-        n_jobs=-1
+        n_jobs=ESTIMATOR_THREADS
     )
     model.fit(X_train, y_train)
     return model
@@ -468,7 +497,7 @@ def train_catboost(X_train, y_train, trial=None, eval_set=None):
         logging_level='Silent',
         allow_writing_files=False,
         task_type=task_type,
-        thread_count=4,  # Limit CPU threads to reduce RAM
+        thread_count=ESTIMATOR_THREADS,  # Budgeted: see ESTIMATOR_THREADS
         border_count=128,  # Limit histogram bins
         max_ctr_complexity=2,  # Reduce memory for categorical features
     )
@@ -560,9 +589,9 @@ def objective_ensemble(trial, X, y, tscv, days: int = None):
     n1 = (y == 1).sum()
     scale_pos_weight = _scale_pos_weight(y)
 
-    xgb_model = xgb.XGBClassifier(**xgb_params, scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='logloss', verbosity=0)
-    lgb_model = lgb.LGBMClassifier(**lgb_params, scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1)
-    rf_model = RandomForestClassifier(**rf_params, random_state=42, n_jobs=-1)
+    rf_model = RandomForestClassifier(**rf_params, random_state=42, n_jobs=ESTIMATOR_THREADS)
+    xgb_model = xgb.XGBClassifier(**xgb_params, scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='logloss', verbosity=0, n_jobs=ESTIMATOR_THREADS)
+    lgb_model = lgb.LGBMClassifier(**lgb_params, scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1, n_jobs=ESTIMATOR_THREADS)
     
     # Tune CatBoost if enabled
     cb_model = None
@@ -575,7 +604,7 @@ def objective_ensemble(trial, X, y, tscv, days: int = None):
         task_type = _detect_gpu_task_type()
         cb_kwargs = dict(
             random_seed=42, logging_level='Silent', allow_writing_files=False,
-            task_type=task_type, thread_count=4, border_count=128, max_ctr_complexity=2,
+            task_type=task_type, thread_count=ESTIMATOR_THREADS, border_count=128, max_ctr_complexity=2,
         )
         if USE_CLASS_WEIGHTS:
             cb_kwargs['auto_class_weights'] = 'Balanced'
@@ -734,11 +763,23 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
     tscv = TimeSeriesSplit(n_splits=5)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
+    # Make the cost of this run visible up front. Under Stacking each trial refits the
+    # base models n_inner times, so wall-clock is dominated by trials x folds x models.
+    # Stacking 模式下每個 trial 都會重跑子模型，成本主要來自 trials x folds x 模型數。
+    if USE_STACKING or USE_BLENDING:
+        inner = 3
+        fits_per_trial = (inner + 1) * len(TIMEFRAMES)
+        logger.info(
+            f"Cost estimate: {OPTUNA_TRIALS} trials x 5 folds x ~{fits_per_trial} "
+            f"model fits per fold. Stacking/Blending refits base models internally; "
+            f"lower OPTUNA_TRIALS to trade quality for time."
+        )
+
     if use_ensemble:
         # Train ensemble
-        logger.info("Optuna Ensemble (50 trials)...")
+        logger.info(f"Optuna Ensemble ({OPTUNA_TRIALS} trials)...")
         study = optuna.create_study(direction='maximize')
-        study.optimize(lambda trial: objective_ensemble(trial, X, y, tscv, days), n_trials=50)
+        study.optimize(lambda trial: objective_ensemble(trial, X, y, tscv, days), n_trials=OPTUNA_TRIALS)
         logger.info(f"  Ensemble best F1 (CV): {study.best_value:.4f}")
 
         # Retrain on LAST fold (with purge/embargo)
@@ -758,23 +799,26 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
             n_estimators=best_p['xgb_n_estimators'], max_depth=best_p['xgb_max_depth'],
             learning_rate=best_p['xgb_learning_rate'], subsample=best_p['xgb_subsample'],
             colsample_bytree=best_p['xgb_colsample_bytree'],
-            scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='logloss', verbosity=0)
+            scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='logloss', verbosity=0,
+            n_jobs=ESTIMATOR_THREADS)
         lgb_model = lgb.LGBMClassifier(
             n_estimators=best_p['lgb_n_estimators'], max_depth=best_p['lgb_max_depth'],
             learning_rate=best_p['lgb_learning_rate'], subsample=best_p['lgb_subsample'],
             colsample_bytree=best_p['lgb_colsample_bytree'],
-            scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1)
+            scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1,
+            n_jobs=ESTIMATOR_THREADS)
         rf_model = RandomForestClassifier(
             n_estimators=best_p['rf_n_estimators'], max_depth=best_p['rf_max_depth'],
-            min_samples_split=best_p['rf_min_samples_split'], random_state=42, n_jobs=-1)
-        
+            min_samples_split=best_p['rf_min_samples_split'], random_state=42,
+            n_jobs=ESTIMATOR_THREADS)
+
         cb_model = None
         if USE_CATBOOST and HAS_CATBOOST:
             cb_kwargs = dict(
                 iterations=best_p.get('cb_iterations', 250),
                 depth=best_p.get('cb_depth', 6),
                 learning_rate=best_p.get('cb_learning_rate', 0.1),
-                random_seed=42, verbose=0,
+                random_seed=42, verbose=0, thread_count=ESTIMATOR_THREADS,
             )
             if USE_CLASS_WEIGHTS:
                 cb_kwargs['auto_class_weights'] = 'Balanced'
@@ -809,6 +853,7 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
         recall = recall_score(y_val, preds, zero_division=0)
 
         best_model = ensemble
+        wf_builder = _make_tuned_ensemble_builder(best_p, tscv, days)
         _save_roc_curve(y_val, proba, timeframe_label, model_type)
 
     else:
@@ -818,24 +863,24 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
         results = {}
         
         # XGBoost
-        logger.info("Optuna XGBoost (50 trials)...")
+        logger.info(f"Optuna XGBoost ({OPTUNA_TRIALS} trials)...")
         study_xgb = optuna.create_study(direction='maximize')
-        study_xgb.optimize(lambda trial: _objective_single(train_xgboost, trial, X, y, tscv, days), n_trials=50)
+        study_xgb.optimize(lambda trial: _objective_single(train_xgboost, trial, X, y, tscv, days), n_trials=OPTUNA_TRIALS)
         results['xgboost'] = study_xgb.best_value
         logger.info(f"  XGBoost best F1: {study_xgb.best_value:.4f}")
 
         # LightGBM
-        logger.info("Optuna LightGBM (50 trials)...")
+        logger.info(f"Optuna LightGBM ({OPTUNA_TRIALS} trials)...")
         study_lgb = optuna.create_study(direction='maximize')
-        study_lgb.optimize(lambda trial: _objective_single(train_lightgbm, trial, X, y, tscv, days), n_trials=50)
+        study_lgb.optimize(lambda trial: _objective_single(train_lightgbm, trial, X, y, tscv, days), n_trials=OPTUNA_TRIALS)
         results['lightgbm'] = study_lgb.best_value
         logger.info(f"  LightGBM best F1: {study_lgb.best_value:.4f}")
         
         # CatBoost (if enabled)
         if USE_CATBOOST and HAS_CATBOOST:
-            logger.info("Optuna CatBoost (50 trials)...")
+            logger.info(f"Optuna CatBoost ({OPTUNA_TRIALS} trials)...")
             study_cb = optuna.create_study(direction='maximize')
-            study_cb.optimize(lambda trial: _objective_single(train_catboost, trial, X, y, tscv, days), n_trials=50)
+            study_cb.optimize(lambda trial: _objective_single(train_catboost, trial, X, y, tscv, days), n_trials=OPTUNA_TRIALS)
             results['catboost'] = study_cb.best_value
             logger.info(f"  CatBoost best F1: {study_cb.best_value:.4f}")
 
@@ -880,6 +925,10 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
         precision = precision_score(y_val, preds, zero_division=0)
         recall = recall_score(y_val, preds, zero_division=0)
         model_type = best_model_name
+        # In single-model mode the saved model is one estimator, so the backtest must
+        # refit that same winner per fold instead of evaluating an ensemble.
+        # 單模型模式下儲存的是單一模型，回測必須逐折重新擬合同一個勝出模型。
+        wf_builder = _make_single_model_builder(best_model_name)
 
         _save_roc_curve(y_val, proba, timeframe_label, model_type)
 
@@ -955,11 +1004,15 @@ def train_single_timeframe(stock_codes: list, timeframe_label: str, days: int, s
     
     # Walk-forward backtest (training-time, honest out-of-sample estimate)
     # 走動前推回測 (訓練時，誠實的樣本外估計)
+    # The builder reproduces exactly what was saved, so the backtest validates the
+    # shipped model rather than a generic one.
+    # builder 重現實際儲存的模型，讓回測評估的是真正部署的模型。
     if USE_WALK_FORWARD:
         logger.info("Running walk-forward backtest... / 執行走動前推回測...")
         _walk_forward_backtest(data, available_features, days, timeframe_label,
                                threshold_buy=best_thresh_buy,
-                               threshold_sell=best_thresh_sell)
+                               threshold_sell=best_thresh_sell,
+                               model_builder=wf_builder)
 
     return model_path, model_type, best_f1, best_auc
 
@@ -1147,6 +1200,41 @@ def _objective_single(train_fn, trial, X, y, tscv, days: int = None):
     return np.mean(scores)
 
 
+def _make_tuned_ensemble_builder(best_params: dict, tscv, days: Optional[int]):
+    """Return a builder that reproduces the tuned ensemble on fresh data.
+    回傳可在新資料上重現「已調參集成」的 builder。
+
+    Walk-forward previously rebuilt a generic default-parameter ensemble, so it
+    validated a model nobody ships. Passing the Optuna best_params costs the same
+    number of fits but measures the real thing.
+    舊實作以通用預設參數重建集成，評估的不是實際部署的模型；改用最佳參數後
+    擬合次數不變，但衡量的是真實模型。
+    """
+
+    def _build(X_train, y_train):
+        return _build_default_ensemble(X_train, y_train, tscv, days,
+                                       best_params=best_params)
+
+    return _build
+
+
+def _make_single_model_builder(model_name: str):
+    """Return a builder that refits the winning single model on fresh data.
+    回傳可在新資料上重新擬合「勝出單模型」的 builder。"""
+    train_fn = {
+        'xgboost': train_xgboost,
+        'lightgbm': train_lightgbm,
+        'catboost': train_catboost,
+    }.get(model_name)
+
+    def _build(X_train, y_train):
+        if train_fn is None:
+            raise ValueError(f"unknown single model: {model_name}")
+        return train_fn(X_train, y_train, trial=None)
+
+    return _build
+
+
 def _train_timeframe_worker(args):
     """Worker function for parallel training of a single timeframe."""
     stock_codes, label, days, shared_data_path = args
@@ -1157,9 +1245,10 @@ def _train_timeframe_worker(args):
         return None
 
 
-def _build_default_ensemble(X_train, y_train, tscv=None, days: Optional[int] = None):
-    """Build a lightweight ensemble with default hyperparameters (no Optuna).
-    使用預設超參數建立輕量集成 (無 Optuna)。Used for fast walk-forward backtest.
+def _build_default_ensemble(X_train, y_train, tscv=None, days: Optional[int] = None,
+                           best_params: Optional[dict] = None):
+    """Build a lightweight ensemble, optionally with Optuna-tuned hyperparameters.
+    建立輕量集成，可選擇使用 Optuna 調好的超參數。Used for the walk-forward backtest.
 
     Resolves the mode exactly like train_single_timeframe (Blending > Stacking > Voting)
     so the backtest measures the model class that actually gets deployed.
@@ -1168,23 +1257,42 @@ def _build_default_ensemble(X_train, y_train, tscv=None, days: Optional[int] = N
     Args / 參數:
         tscv: Cross-validator for Blending's OOF folds. None -> TimeSeriesSplit(5).
         days: Target horizon for purge/embargo (None = no purge) / purge 用的目標天數
+        best_params: Optuna best_params from the real fit. When given, the backtest
+            evaluates the SAME hyperparameters that ship, so it validates the model
+            that is actually saved. None -> generic defaults.
+            使用正式訓練的最佳參數，讓回測評估的正是真正儲存的模型；None 則用通用預設值。
     """
+    p = best_params or {}
     scale_pos_weight = _scale_pos_weight(y_train)
     ests = []
     ests.append(('xgb', xgb.XGBClassifier(
-        n_estimators=150, max_depth=6, learning_rate=0.1,
+        n_estimators=p.get('xgb_n_estimators', 150),
+        max_depth=p.get('xgb_max_depth', 6),
+        learning_rate=p.get('xgb_learning_rate', 0.1),
+        subsample=p.get('xgb_subsample', 1.0),
+        colsample_bytree=p.get('xgb_colsample_bytree', 1.0),
         scale_pos_weight=scale_pos_weight, random_state=42,
-        use_label_encoder=False, eval_metric='logloss', verbosity=0)))
+        use_label_encoder=False, eval_metric='logloss', verbosity=0,
+        n_jobs=ESTIMATOR_THREADS)))
     ests.append(('lgb', lgb.LGBMClassifier(
-        n_estimators=150, max_depth=6, learning_rate=0.1,
-        scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1)))
+        n_estimators=p.get('lgb_n_estimators', 150),
+        max_depth=p.get('lgb_max_depth', 6),
+        learning_rate=p.get('lgb_learning_rate', 0.1),
+        subsample=p.get('lgb_subsample', 1.0),
+        colsample_bytree=p.get('lgb_colsample_bytree', 1.0),
+        scale_pos_weight=scale_pos_weight, random_state=42, verbosity=-1,
+        n_jobs=ESTIMATOR_THREADS)))
     ests.append(('rf', RandomForestClassifier(
-        n_estimators=150, max_depth=10, random_state=42, n_jobs=-1)))
+        n_estimators=p.get('rf_n_estimators', 150),
+        max_depth=p.get('rf_max_depth', 10),
+        min_samples_split=p.get('rf_min_samples_split', 2),
+        random_state=42, n_jobs=ESTIMATOR_THREADS)))
     if USE_CATBOOST and HAS_CATBOOST:
         cb_kwargs = dict(
-            iterations=200, depth=6, learning_rate=0.1, random_seed=42,
+            iterations=p.get('cb_iterations', 200), depth=p.get('cb_depth', 6),
+            learning_rate=p.get('cb_learning_rate', 0.1), random_seed=42,
             logging_level='Silent', allow_writing_files=False,
-            task_type=_detect_gpu_task_type(), thread_count=4,
+            task_type=_detect_gpu_task_type(), thread_count=ESTIMATOR_THREADS,
             border_count=128, max_ctr_complexity=2,
         )
         if USE_CLASS_WEIGHTS:
@@ -1207,18 +1315,23 @@ def _build_default_ensemble(X_train, y_train, tscv=None, days: Optional[int] = N
 
 
 def _walk_forward_backtest(data, available_features, days, timeframe_label,
-                           threshold_buy=0.55, threshold_sell=0.45):
+                           threshold_buy=0.55, threshold_sell=0.45, model_builder=None):
     """Walk-forward backtest: train on expanding purged windows, predict forward, simulate.
     走動前推回測：在擴展 purge 視窗上訓練，向前預測並模擬。
 
-    Uses default-parameter ensembles (no Optuna) for speed, but resolves the same
-    ensemble mode as the deployed model (Blending > Stacking > Voting).
-    使用預設參數集成 (無 Optuna) 以加快速度，但與部署模型使用相同的集成模式解析。
+    Uses the same mode AND the same hyperparameters as the model that was just saved,
+    so the backtest validates the model that actually ships. Pass model_builder from
+    train_single_timeframe to guarantee that; without it, generic defaults are used.
+    使用與剛儲存模型相同的模式與超參數，讓回測評估真正部署的模型。
+    由 train_single_timeframe 傳入 model_builder 可確保一致；未傳入則使用通用預設值。
 
     Args / 參數:
         threshold_buy / threshold_sell: Optimized signal thresholds from the final fit,
             so the backtest applies the same rule the predictor uses.
             最終擬合所最佳化的信號閾值，讓回測套用與預測相同的規則。
+        model_builder: Callable(X_train, y_train) -> fitted estimator with
+            predict_proba, matching whichever mode is being trained.
+            對應目前訓練模式的已擬合模型產生器。
 
     Returns / 返回:
         Dict of metrics, or None on failure.
@@ -1234,7 +1347,10 @@ def _walk_forward_backtest(data, available_features, days, timeframe_label,
             X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
             y_train = y.iloc[train_idx]
             X_train_sm, y_train_sm = _apply_smote(X_train, y_train)
-            model = _build_default_ensemble(X_train_sm, y_train_sm, tscv, days)
+            if model_builder is not None:
+                model = model_builder(X_train_sm, y_train_sm)
+            else:
+                model = _build_default_ensemble(X_train_sm, y_train_sm, tscv, days)
             proba = model.predict_proba(X_val)[:, 1]
             for gi, p in zip(val_idx, proba):
                 results.append((int(gi), float(p)))
@@ -1252,19 +1368,34 @@ def _walk_forward_backtest(data, available_features, days, timeframe_label,
             fwd = close.shift(-days) / close - 1
             ret_fwd = fwd.iloc[gidxs].values
             signal = np.where(all_proba > threshold_buy, 1, np.where(all_proba < threshold_sell, -1, 0))
-            strat_ret = np.mean(ret_fwd[signal == 1]) if (signal == 1).any() else 0.0
-            hold_ret = np.mean(ret_fwd) if len(ret_fwd) else 0.0
+
+            # The last `days` rows have no future price, so fwd is NaN there. Because
+            # walk-forward folds always reach the end of the sample, those NaNs land
+            # inside the validation indices and used to poison the means below,
+            # producing strategy_return=nan / buy_hold_return=nan on most runs.
+            # 由於 walk-forward 各折一定延伸到樣本末端，末端 days 列的 fwd 為 NaN，
+            # 會污染均值，使 strategy_return / buy_hold_return 變成 nan。
+            finite = np.isfinite(ret_fwd)
+            long_mask = (signal == 1) & finite
+            strat_ret = float(np.mean(ret_fwd[long_mask])) if long_mask.any() else 0.0
+            hold_ret = float(np.mean(ret_fwd[finite])) if finite.any() else 0.0
+            n_dropped = int((~finite).sum())
             stats['strategy_return'] = round(float(strat_ret), 6)
             stats['buy_hold_return'] = round(float(hold_ret), 6)
             stats['alpha'] = round(float(strat_ret - hold_ret), 6)
             stats['buy_ratio'] = round(float((signal == 1).mean()), 4)
             stats['sell_ratio'] = round(float((signal == -1).mean()), 4)
+            stats['returns_evaluated'] = int(finite.sum())
+            if n_dropped:
+                stats['returns_dropped_no_future_price'] = n_dropped
 
         f1 = f1_score(all_y, (all_proba > 0.5).astype(int), zero_division=0)
         auc = roc_auc_score(all_y, all_proba)
         stats['f1'] = round(float(f1), 4)
         stats['auc'] = round(float(auc), 4)
         stats['samples'] = int(len(all_y))
+        if model_builder is not None:
+            stats['model_builder'] = 'custom'
 
         # Save CSV / 儲存 CSV
         csv_path = os.path.join(MODELS_DIR, f'walk_forward_{timeframe_label}.csv')

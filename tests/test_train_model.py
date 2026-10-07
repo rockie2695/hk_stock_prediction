@@ -322,6 +322,76 @@ class TestPurgeAndClassWeights:
             voted = tm._build_default_ensemble(X, y)
         assert isinstance(voted, VotingClassifier)
 
+    def test_default_ensemble_uses_supplied_best_params(self, sample_training_data):
+        """Regression: walk-forward must evaluate the TUNED model, not a generic one.
+
+        It previously rebuilt every estimator with hardcoded defaults, so the
+        backtest validated a model that was never shipped - and the result was
+        identical no matter which hyperparameters Optuna selected.
+        回歸測試：回測必須使用「已調參」的模型，而非通用預設值。
+        """
+        from unittest.mock import patch
+
+        import src.train_model as tm
+        X, y = sample_training_data
+
+        tuned = {
+            'xgb_n_estimators': 7, 'xgb_max_depth': 2, 'xgb_learning_rate': 0.02,
+            'xgb_subsample': 0.7, 'xgb_colsample_bytree': 0.8,
+            'lgb_n_estimators': 9, 'lgb_max_depth': 3, 'lgb_learning_rate': 0.03,
+            'lgb_subsample': 0.75, 'lgb_colsample_bytree': 0.85,
+            'rf_n_estimators': 11, 'rf_max_depth': 4, 'rf_min_samples_split': 3,
+            'cb_iterations': 13, 'cb_depth': 5, 'cb_learning_rate': 0.04,
+        }
+        with patch.object(tm, 'USE_STACKING', False):
+            model = tm._build_default_ensemble(X, y, best_params=tuned)
+            named = model.named_estimators_
+            assert named['xgb'].n_estimators == 7
+            assert named['xgb'].max_depth == 2
+            assert named['lgb'].n_estimators == 9
+            assert named['rf'].n_estimators == 11
+            if 'cb' in named:
+                cb_params = named['cb'].get_params()
+                assert cb_params.get('iterations') == 13
+                assert cb_params.get('depth') == 5
+
+            # No best_params -> documented generic defaults
+            plain = tm._build_default_ensemble(X, y)
+            pnamed = plain.named_estimators_
+            assert pnamed['xgb'].n_estimators == 150
+            assert pnamed['xgb'].max_depth == 6
+            assert pnamed['rf'].n_estimators == 150
+
+    def test_walk_forward_accepts_model_builder(self, sample_training_data, tmp_path):
+        """The backtest must use the supplied builder rather than its own default."""
+        from sklearn.ensemble import RandomForestClassifier
+
+        import src.train_model as tm
+        X, y = sample_training_data
+        data = X.copy()
+        data['Close'] = 100 * (1 + np.random.randn(len(X)) * 0.01).cumprod()
+        data['target'] = y
+
+        sentinel = {"calls": 0}
+
+        class _Fixed:
+            def __init__(self, Xtr, ytr):
+                sentinel["calls"] += 1
+                self.m_ = RandomForestClassifier(
+                    n_estimators=20, max_depth=3, random_state=0).fit(Xtr, ytr)
+
+            def predict_proba(self, Xq):
+                return self.m_.predict_proba(Xq)
+
+        with patch.object(tm, 'MODELS_DIR', str(tmp_path)):
+            stats = tm._walk_forward_backtest(
+                data, X.columns.tolist(), days=5, timeframe_label='5d',
+                model_builder=_Fixed)
+
+        assert stats is not None
+        assert sentinel["calls"] == 5  # one per purged fold
+        assert stats['model_builder'] == 'custom'
+
     def test_walk_forward_backtest(self, sample_training_data, tmp_path):
         """_walk_forward_backtest returns stats dict and saves CSV."""
         import src.train_model as tm
@@ -335,6 +405,34 @@ class TestPurgeAndClassWeights:
         assert 'f1' in stats and 'auc' in stats
         assert 0 <= stats['auc'] <= 1
         assert (tmp_path / 'walk_forward_5d.csv').exists()
+
+    def test_walk_forward_returns_are_finite(self, sample_training_data, tmp_path):
+        """Regression: returns must not be NaN.
+
+        The final `days` rows have no future price, so the forward return is NaN there.
+        Walk-forward folds always reach the end of the sample, so those NaNs landed in
+        the validation indices and made np.mean return NaN - which is why
+        strategy_return / buy_hold_return were NaN on most real runs.
+        末端 days 列沒有未來價格，walk-forward 各折一定延伸到樣本末端，
+        導致均值為 NaN。回歸測試確保報酬數值為有限值。
+        """
+        import math
+
+        import src.train_model as tm
+        X, y = sample_training_data
+        data = X.copy()
+        data['Close'] = 100 * (1 + np.random.randn(len(X)) * 0.01).cumprod()
+        data['target'] = y
+        with patch.object(tm, 'MODELS_DIR', str(tmp_path)):
+            stats = tm._walk_forward_backtest(data, X.columns.tolist(), days=5, timeframe_label='5d')
+
+        assert stats is not None
+        assert math.isfinite(stats['strategy_return']), stats['strategy_return']
+        assert math.isfinite(stats['buy_hold_return']), stats['buy_hold_return']
+        assert math.isfinite(stats['alpha'])
+        # The 5 rows without a future close must be excluded, not averaged in.
+        assert stats['returns_evaluated'] > 0
+        assert stats['returns_evaluated'] < len(data)
 
 
 class TestModelMetadata:

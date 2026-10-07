@@ -259,7 +259,7 @@ python -m pytest tests/ -v --tb=short
 | `catboost_info/` | CatBoost 訓練過程暫存檔（可忽略） |
 | Telegram（可選） | 設定 `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` 後，成功/失敗會發送通知 |
 
-> **Note:** 步驟 1（訓練）在 Voting 模式約 5-15 分鐘，Stacking / Blending 模式會明顯更久（詳見「訓練要多久？」）；步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日及香港公眾假期會跳過整個流程，不產生任何輸出。
+> **Note:** 步驟 1（訓練）在 Voting 模式約 15-25 分鐘，但 Stacking 模式在預設 `OPTUNA_TRIALS=50` 下約需 **2 小時** — 詳見「訓練要多久？」，若太慢可調低 `OPTUNA_TRIALS`。步驟 2（清理）與步驟 3（預測上傳）各約數秒。週六、日及香港公眾假期會跳過整個流程，不產生任何輸出。
 
 ## Docker 部署
 
@@ -388,7 +388,7 @@ project_root/
 - **交叉驗證**: TimeSeriesSplit (n_splits=5) + Purge/Embargo (防止標籤視窗重疊洩漏)
 - **類別不平衡處理**: SMOTE (僅在訓練折上套用) + Class-weight (USE_CLASS_WEIGHTS)
 - **訓練數據**: 3 年歷史數據 (約 750 交易日)
-- **走動前推回測**: 訓練後自動在 purged 擴展窗口上回測。為加快速度使用預設超參數 (無 Optuna)，但會解析出與**實際部署模型相同的集成模式** (Blending > Stacking > Voting)，並套用**最佳化後的 Buy/Sell 閾值**，確保回測結果反映真正上線的行為
+- **走動前推回測**: 訓練後自動在 purged 擴展窗口上回測，並以**與剛儲存模型完全相同的模式、相同的 Optuna 最佳超參數、相同的最佳化 Buy/Sell 閾值**重新擬合 — 因此回測衡量的正是實際部署的模型。單模型模式下會重新擬合勝出的單一模型，而非集成。統計值包含 `returns_evaluated` / `returns_dropped_no_future_price`，因為末端 `days` 列沒有未來價格，會被排除而不是像以前那樣被當成 `NaN` 一起平均進去
 - **評估指標**: F1 Score, AUC, Precision, Recall
 - **ROC 曲線**: 自動儲存至 `models/roc_curve_{timeframe}.png`
 - **特徵相關性過濾**: 自動移除 |corr| > 0.95 的冗餘特徵
@@ -446,13 +446,14 @@ project_root/
 | 環境變數 | 預設值 | 說明 |
 |---|---|---|
 | `USE_ENSEMBLE` | `True` | 啟用模型集成 (False = 單模型比較) |
-| `USE_STACKING` | `False` | 使用 StackingClassifier (元模型學習組合) |
-| `USE_BLENDING` | `False` | 使用 Blending (out-of-fold stacking，通常更準確) |
+| `USE_STACKING` | `False` | 使用 StackingClassifier。**實測劣於 Voting — 建議保持關閉** (見常見問題) |
+| `USE_BLENDING` | `False` | 使用 Blending (out-of-fold)。與 Stacking 相同的限制，預設關閉 |
 | `USE_CATBOOST` | `True` | 包含 CatBoost 作為第4個模型 |
 | `USE_SMOTE` | `True` | 啟用 SMOTE 類別不平衡處理 |
 | `USE_CLASS_WEIGHTS` | `True` | 啟用類別不平衡權重 (SMOTE=True 時通常無效) |
 | `USE_GPU` | `False` | CatBoost 使用 GPU 訓練 (需要 NVIDIA GPU，會使用更多記憶體) |
 | `USE_WALK_FORWARD` | `True` | 訓練後自動執行走動前推回測 (與部署模型相同的集成模式) |
+| `OPTUNA_TRIALS` | `50` | 每個時間範圍的 Optuna 搜尋次數。執行時間幾乎成線性縮放；調低可換取速度。Stacking 每個 trial 約為 Voting 的 4 倍 |
 
 **優先級規則：**
 模式依下列順序解析，**第一個符合者勝出**，因此這些開關**並非互相獨立**：
@@ -682,10 +683,29 @@ A: F1 = 精準率與召回率的平衡。F1 > 0.5 表示模型比隨機好，F1 
 A: 同時訓練 XGBoost、LightGBM、RandomForest、CatBoost 四個模型，透過 VotingClassifier (加權平均)、StackingClassifier (元模型學習) 或 Blending (out-of-fold stacking) 結合它們的預測機率。通常比單一模型更穩定、AUC 更高。
 
 ### Q: Voting、Stacking、Blending 有什麼差別？
-A: 
+A:
 - **Voting**: 用加權平均結合四個模型的預測機率 (預設，最快)
-- **Stacking**: 用一個元模型 (LogisticRegression) 學習如何最佳組合四個模型的預測 (較慢但通常更準)
-- **Blending**: 類似 Stacking，但使用 out-of-fold predictions 避免過擬合 (最慢但通常最準)
+- **Stacking**: 用一個元模型 (LogisticRegression) 學習如何最佳組合四個模型的預測 (較慢；**實測在此資料上更差**)
+- **Blending**: 類似 Stacking，但使用 out-of-fold predictions (最慢；此處同樣不建議)
+
+### Q: 為什麼預設是 Voting 而不是 Stacking？
+A: 因為這是**實測**出來的，不是憑感覺。兩組實驗跑在**完全相同的資料**上、同一條正式 pipeline，只差在模式這一個變數，並且用**樣本外 walk-forward AUC** 判斷（不是看 log 裡的 holdout 分數）。
+
+| 時間範圍 | Voting AUC | Stacking AUC | 差異 | 95% 信賴區間 | 結論 |
+|---|---|---|---|---|---|
+| 20d | **0.5904** | 0.5308 | **+0.0596** | [+0.039, +0.080] | Voting 勝 (P=1.000) |
+| 1d | 0.5330 | 0.5194 | +0.0136 | [−0.012, +0.040] | 無顯著差異 |
+
+（5000 次配對 bootstrap（paired bootstrap），每組使用完全相同的樣本列。訓練時間：Voting 約 8 分鐘 vs Stacking 約 23 分鐘／時間範圍。）
+
+**為何 Stacking 在這裡沒有幫助 — 兩個原因：**
+
+1. **四個子模型高度相關。** XGBoost、LightGBM、CatBoost、RandomForest 都是樹狀模型，而且用的是**同一份 48 項特徵**，所以它們的預測機率幾乎同步移動。Stacking 真正有價值的前提是子模型**多樣**；當子模型彼此高度相關，元模型其實沒有東西可以發揮。
+2. **線性元模型餵 4 個高度相關的輸入，幾乎沒增加任何表達能力。** `LogisticRegression` 吃 4 個機率作輸入，实质上就是在學**另一組權重** — 而這正是加權 Voting 已經在做的事。換句話說，Stacking 沒有提供 Voting 做不到的表達能力，只增加了估計變異；但代價是約 **3 倍**的執行時間，因為 `StackingClassifier(cv=3)` 會在每個交叉驗證折內部重新擬合子模型。
+
+**最容易踩到的陷阱：** 在 20d 上，Stacking 的 **holdout F1 反而比較高**（0.697 vs 0.655），但樣本外 AUC 卻**更差**。原因在於 holdout 分數是用來挑超參數的那同一個 validation 折算出來的，而 Stacking 的搜尋空間比較大，在這種「贏最大值」的比較下天然佔便宜。**比較模式時請一律看 walk-forward AUC，不要看儀表板上的 F1/AUC。**
+
+**如果你還是想試：** 設 `USE_STACKING=True`，然後用 `models/walk_forward_{tf}.csv` 判斷；只有在樣本外 AUC 真的有改善時才值得保留。
 
 ### Q: CatBoost 是什麼？為什麼要加它？
 A: CatBoost 是 Yandex 開發的梯度提升框架，對類別型特徵處理更好，在金融數據上通常表現優於 XGBoost/LightGBM。加入後可提升集成模型的準確度。
@@ -713,7 +733,26 @@ A: 整個流程會被跳過 — 不訓練、不清理、不預測、不上傳 �
 A: 日誌位於 `logs/app.log`
 
 ### Q: 訓練要多久？
-A: 取決於集成模式，因為 Stacking 與 Blending 會在內部重新擬合子模型。粗估 **Voting 約 5-15 分鐘**、**Stacking 約 15-40 分鐘**、**Blending 約 30-60 分鐘以上**；`USE_WALK_FORWARD=True` 會再為每個時間範圍增加 5 折回測。三個時間範圍平行訓練，因此實際耗時由最慢的那個決定。上述為一般硬體上的量級估算而非保證，實際數值請查看 `logs/app.log`。
+A: 取決於集成模式，因為 Stacking 與 Blending 會在**每個交叉驗證折內部**重新擬合子模型。
+
+**實測**（20 核心、三個時間範圍平行、約 2750 列 × 46 項特徵）：
+
+| 模式 | Optuna 主迴圈（50 trials） | 說明 |
+|---|---|---|
+| Voting | 約 15-25 分鐘 | 每折擬合 4 個子模型各一次 |
+| **Stacking** | **約 2 小時** | `StackingClassifier(cv=3)` 會在每折之內再重跑子模型 3 次，因此每個 trial 約為 voting 的 4 倍 |
+| Blending | 約 3 小時以上 | 每折額外執行一次 out-of-fold |
+
+走動前推回測僅增加約 2 分鐘。若某次執行長達數小時，請查看 `logs/app.log` 中 `Optuna Ensemble` 與 `Ensemble best F1 (CV)` 之間的間隔 — 該區間就是 Optuna 主迴圈。
+
+**三種縮短方式（依建議順序）：**
+
+1. **調低 `OPTUNA_TRIALS`**（不需改程式）。執行時間幾乎成線性縮放：
+   ```env
+   OPTUNA_TRIALS=20   # 比 50 快約 40%，代價是超參數搜尋略弱
+   ```
+2. **改用 Voting 而非 Stacking** — 設定 `USE_STACKING=False`。約快 4 倍，且為本專案預設模式。
+3. **縮小資料集** — 4 檔股票 3 年日線約 2750 列，每多一列都會倍增全部約 4000 次子模型擬合的成本。
 
 ### Q: 預測要多久？
 A: 平行預測多支股票，約 5-10 秒 (取決於股票數量)。
