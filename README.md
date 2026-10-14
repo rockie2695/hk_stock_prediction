@@ -1196,6 +1196,12 @@ TELEGRAM_CHAT_ID=           # Telegram Chat ID
 - `src/train_model.py` — 新增文件字串
 - `requirements.txt` — 版本鎖定、分類整理
 
+![screen-cap1](screen-cap1.png)
+![screen-cap2](screen-cap2.png)
+![screen-cap3](screen-cap3.png)
+![screen-cap4](screen-cap4.png)
+![screen-cap5](screen-cap5.png)
+
 ## 授權
 
 本專案僅供學習和研究使用，不構成任何投資建議。投資有風險，入市需謹慎。
